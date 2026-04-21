@@ -21,7 +21,8 @@ env/
 # Data & caches (large / regenerable)
 cache/
 data/lbnl/
-data/sft/
+data/sft_data/
+data/rl_data/
 
 # Training outputs
 output/
