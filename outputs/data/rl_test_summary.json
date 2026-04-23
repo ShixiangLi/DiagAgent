@@ -1,0 +1,10 @@
+{
+  "total_prompts": 469,
+  "scenario_type_counts": {
+    "low_confidence": 200,
+    "ambiguous": 123,
+    "single_system": 123,
+    "no_fault": 3,
+    "cross_system": 20
+  }
+}

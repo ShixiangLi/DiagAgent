@@ -1,0 +1,160 @@
+# =============================================================================
+# Topology Configuration — LBNL_FDD HVAC Systems
+# =============================================================================
+# Defines the multi-tier topology: Building → System → Node → Sensor
+# TTL file paths are relative to data/lbnl/
+
+# ---------------------------------------------------------------------------
+# System registry — maps system_id to its TTL file and metadata
+# ---------------------------------------------------------------------------
+systems:
+  chiller_plant:
+    name: "Chiller Plant"
+    ttl_file: "LBNL_FDD_Data_Sets_Chiller_Plant/LBNL_FDD_Data_Sets_chiller_plant.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_Chiller_Plant"
+    system_type: "water"
+    description: "Central chiller plant with 3 chillers, cooling towers, and pumps providing chilled water"
+
+  boiler_plant:
+    name: "Boiler Plant"
+    ttl_file: "LBNL_FDD_Data_Sets_Boiler_Plant/LBNL_FDD_Data_Sets_Boiler_Plant_ttl.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_Boiler_Plant"
+    system_type: "water"
+    description: "Hot water boiler plant with 2 boilers and pumps providing heating water"
+
+  sdahu:
+    name: "Single-Duct AHU"
+    ttl_file: "LBNL_FDD_Data_Sets_SDAHU/LBNL_FDD_Data_Sets_SDAHU_ttl.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_SDAHU"
+    system_type: "air"
+    description: "Single-duct variable air volume AHU serving 5 zones via VAV boxes"
+
+  ddahu:
+    name: "Dual-Duct AHU"
+    ttl_file: "LBNL_FDD_Data_Sets_DDAHU/LBNL_FDD_Data_Sets_DDAHU_ttl.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_DDAHU"
+    system_type: "air"
+    description: "Dual-duct AHU with hot and cold decks serving 4 mixing box VAV zones"
+
+  rtu:
+    name: "Rooftop Unit"
+    ttl_file: "LBNL_FDD_Data_Sets_RTU/LBNL_FDD_Data_Sets_RTU_Sim.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_RTU"
+    system_type: "air"
+    description: "Packaged rooftop unit with DX cooling, compressors, condenser, and supply fan"
+
+  fcu:
+    name: "Fan Coil Unit"
+    ttl_file: "LBNL_FDD_Data_Sets_Fan_coil_unit/LBNL_FDD_Data_Sets_FCU_ttl.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_Fan_coil_unit"
+    system_type: "air"
+    description: "Fan coil unit with cooling/heating coils, fan, outdoor air damper"
+
+  pfpu:
+    name: "Parallel Fan Powered Unit"
+    ttl_file: "LBNL_FDD_Data_Sets_FPU/LBNL_FDD_Data_Sets_PFPU_ttl.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_FPU"
+    system_type: "terminal"
+    description: "Parallel fan powered VAV terminal unit with reheat"
+
+  sfpu:
+    name: "Series Fan Powered Unit"
+    ttl_file: "LBNL_FDD_Data_Sets_FPU/LBNL_FDD_Data_Sets_SFPU_ttl.ttl"
+    data_dir: "LBNL_FDD_Data_Sets_FPU"
+    system_type: "terminal"
+    description: "Series fan powered VAV terminal unit with reheat"
+
+# ---------------------------------------------------------------------------
+# Cross-system connections — defines inter-system thermal/fluid flow edges
+# Format: source_system.source_node → target_system.target_node (medium)
+# ---------------------------------------------------------------------------
+cross_system_links:
+  # Chiller plant provides chilled water to air-side cooling coils
+  - source_system: "chiller_plant"
+    source_node: "Chilled_Water_System"
+    target_system: "sdahu"
+    target_node: "Cooling_Coil"
+    medium: "chilled_water"
+    description: "Chiller plant supplies chilled water to SDAHU cooling coil"
+
+  - source_system: "chiller_plant"
+    source_node: "Chilled_Water_System"
+    target_system: "ddahu"
+    target_node: "Cooling_Coil"
+    medium: "chilled_water"
+    description: "Chiller plant supplies chilled water to DDAHU cooling coil"
+
+  - source_system: "chiller_plant"
+    source_node: "Chilled_Water_System"
+    target_system: "fcu"
+    target_node: "fcu_zone"
+    medium: "chilled_water"
+    description: "Chiller plant supplies chilled water to FCU zone"
+
+  # Boiler plant provides hot water to air-side heating coils
+  - source_system: "boiler_plant"
+    source_node: "Simulated_Boiler_Plant"
+    target_system: "sdahu"
+    target_node: "AHU"
+    medium: "hot_water"
+    description: "Boiler plant supplies hot water to SDAHU AHU heating coil"
+
+  - source_system: "boiler_plant"
+    source_node: "Simulated_Boiler_Plant"
+    target_system: "ddahu"
+    target_node: "Heating_Coil"
+    medium: "hot_water"
+    description: "Boiler plant supplies hot water to DDAHU heating coil"
+
+  - source_system: "boiler_plant"
+    source_node: "Simulated_Boiler_Plant"
+    target_system: "fcu"
+    target_node: "fcu_zone"
+    medium: "hot_water"
+    description: "Boiler plant supplies hot water to FCU zone heating valve"
+
+  - source_system: "boiler_plant"
+    source_node: "Simulated_Boiler_Plant"
+    target_system: "pfpu"
+    target_node: "Heating_Coil"
+    medium: "hot_water"
+    description: "Boiler plant supplies hot water to PFPU heating coil"
+
+  - source_system: "boiler_plant"
+    source_node: "Simulated_Boiler_Plant"
+    target_system: "sfpu"
+    target_node: "Heating_Coil"
+    medium: "hot_water"
+    description: "Boiler plant supplies hot water to SFPU heating coil"
+
+  # AHU feeds conditioned air to terminal units
+  - source_system: "sdahu"
+    source_node: "AHU"
+    target_system: "pfpu"
+    target_node: "Parallel_FPU_E"
+    medium: "conditioned_air"
+    description: "SDAHU supplies conditioned air to parallel FPU zones"
+
+  - source_system: "sdahu"
+    source_node: "AHU"
+    target_system: "sfpu"
+    target_node: "Series_FPU_E"
+    medium: "conditioned_air"
+    description: "SDAHU supplies conditioned air to series FPU zones"
+
+# ---------------------------------------------------------------------------
+# Topology hierarchy levels
+# ---------------------------------------------------------------------------
+hierarchy_levels:
+  - level: 0
+    name: "Building"
+    description: "Top-level building entity"
+  - level: 1
+    name: "System"
+    description: "Major HVAC systems (Chiller Plant, Boiler Plant, AHU, RTU, etc.)"
+  - level: 2
+    name: "Node"
+    description: "System components (Chillers, Pumps, Coils, Fans, Dampers, VAV Boxes)"
+  - level: 3
+    name: "Sensor"
+    description: "Individual sensor/actuator points (temperature, pressure, flow, status)"

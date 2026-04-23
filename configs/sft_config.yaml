@@ -1,0 +1,41 @@
+# SFT Training Configuration
+model_name: "Qwen/Qwen2.5-7B-Instruct"
+output_dir: "outputs/sft"
+data_path: "outputs/data/sft_train.jsonl"
+
+# LoRA
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# Training (optimized for RTX PRO 6000 96GB)
+num_epochs: 3
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 16
+learning_rate: 2.0e-5
+lr_scheduler_type: cosine
+warmup_steps: 100
+max_seq_length: 6144
+weight_decay: 0.01
+bf16: true
+gradient_checkpointing: true
+
+# Evaluation
+eval_split_ratio: 0.1
+eval_steps: 50
+save_steps: 50
+logging_steps: 10
+load_best_model_at_end: true
+metric_for_best_model: "eval_loss"
+diag_eval_episodes: 50  # Full Oracle diagnostic eval per checkpoint
+
+# Data
+dataset_format: "sharegpt"

@@ -1,0 +1,225 @@
+# Diagnostic Path Templates
+# Defines fault propagation paths and abnormal indicators for each fault category.
+# Auto-generated paths from topology are merged with these templates (templates take priority).
+
+# =============================================================================
+# Abnormal hint library — reusable indicators for intermediate path nodes
+# =============================================================================
+abnormal_hints:
+  # Chiller plant related
+  condenser_water_temp_high: "Condenser water temperature is significantly above setpoint, indicating reduced heat rejection."
+  chiller_efficiency_degraded: "Chiller COP has dropped below expected levels; condenser water temperature is elevated."
+  chilled_water_temp_high: "Chilled water supply temperature is above setpoint despite full chiller operation."
+  chilled_water_pressure_abnormal: "Secondary chilled water loop differential pressure deviates from setpoint."
+  bypass_flow_detected: "Unexpected condenser water flow through the bypass path; condenser water temperature affected."
+
+  # Boiler plant related
+  hot_water_temp_low: "Hot water supply temperature is below setpoint, reducing heating capacity for downstream systems."
+  hot_water_temp_high: "Hot water supply temperature is above setpoint, causing overheating in downstream systems."
+  hot_water_pressure_abnormal: "Hot water loop differential pressure is abnormal, affecting flow distribution."
+  boiler_efficiency_degraded: "Boiler is consuming more fuel than expected for the current heating load."
+
+  # AHU related
+  supply_air_temp_above_setpoint: "Supply air temperature cannot reach cooling setpoint; coil valve is fully open."
+  supply_air_temp_below_setpoint: "Supply air temperature is below setpoint, potentially overcooling zones."
+  mixed_air_temp_abnormal: "Mixed air temperature deviates from expected, damper position may be incorrect."
+  zone_temp_rising: "Zone temperatures are drifting above cooling setpoint despite AHU running."
+  zone_temp_dropping: "Zone temperatures are dropping below heating setpoint."
+  insufficient_airflow: "Airflow volume is below design levels; check fan and damper operation."
+
+# =============================================================================
+# Path templates per fault category
+# =============================================================================
+path_templates:
+
+  # ----- Chiller Plant Faults -----
+  coolingtower_fouling:
+    root_cause_component: "Cooling_Tower_*"
+    within_system_path:
+      - component: "Chilled_Water_System"
+        hint: "chilled_water_temp_high"
+        direction: "upstream"
+      - component: "Chiller_*"
+        hint: "chiller_efficiency_degraded"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "Cooling_Coil"
+        hint: "supply_air_temp_above_setpoint"
+      - system: ddahu
+        component: "Cold_Deck"
+        hint: "supply_air_temp_above_setpoint"
+      - system: fcu
+        component: "fcu_zone"
+        hint: "zone_temp_rising"
+
+  coolingtower_bias:
+    root_cause_component: "Cooling_Tower_*"
+    within_system_path:
+      - component: "Chilled_Water_System"
+        hint: "chilled_water_temp_high"
+        direction: "upstream"
+      - component: "Chiller_*"
+        hint: "chiller_efficiency_degraded"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "Cooling_Coil"
+        hint: "supply_air_temp_above_setpoint"
+
+  coolingtower_PI:
+    root_cause_component: "Cooling_Tower_*"
+    within_system_path:
+      - component: "Chiller_*"
+        hint: "chiller_efficiency_degraded"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "Cooling_Coil"
+        hint: "supply_air_temp_above_setpoint"
+
+  chiller_bias:
+    root_cause_component: "Chiller_*"
+    within_system_path:
+      - component: "Chilled_Water_System"
+        hint: "chilled_water_temp_high"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "Cooling_Coil"
+        hint: "supply_air_temp_above_setpoint"
+      - system: ddahu
+        component: "Cold_Deck"
+        hint: "supply_air_temp_above_setpoint"
+
+  chiller_fouling:
+    root_cause_component: "Chiller_*"
+    within_system_path:
+      - component: "Chilled_Water_System"
+        hint: "chilled_water_temp_high"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "Cooling_Coil"
+        hint: "supply_air_temp_above_setpoint"
+
+  bypass_leakage:
+    root_cause_component: "Threeway_Valve"
+    within_system_path:
+      - component: "Cooling_Tower_*"
+        hint: "condenser_water_temp_high"
+        direction: "upstream"
+    downstream_symptoms: []
+
+  bypass_stuck:
+    root_cause_component: "Threeway_Valve"
+    within_system_path:
+      - component: "Cooling_Tower_*"
+        hint: "condenser_water_temp_high"
+        direction: "upstream"
+    downstream_symptoms: []
+
+  secondary_chilled_water_pressure_bias:
+    root_cause_component: "Secondary_Chilled_Water_Loop_Pump_*"
+    within_system_path:
+      - component: "Chilled_Water_System"
+        hint: "chilled_water_pressure_abnormal"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "Cooling_Coil"
+        hint: "supply_air_temp_above_setpoint"
+
+  # ----- Boiler Plant Faults -----
+  boiler_bias:
+    root_cause_component: "Boiler_*"
+    within_system_path:
+      - component: "Simulated_Boiler_Plant"
+        hint: "hot_water_temp_low"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "AHU"
+        hint: "zone_temp_dropping"
+      - system: ddahu
+        component: "Heating_Coil"
+        hint: "zone_temp_dropping"
+
+  boiler_foul:
+    root_cause_component: "Boiler_*"
+    within_system_path:
+      - component: "Simulated_Boiler_Plant"
+        hint: "boiler_efficiency_degraded"
+        direction: "upstream"
+    downstream_symptoms:
+      - system: sdahu
+        component: "AHU"
+        hint: "zone_temp_dropping"
+
+  boiler_PI:
+    root_cause_component: "Boiler_*"
+    within_system_path: []
+    downstream_symptoms: []
+
+  hot_water_temp_bias:
+    root_cause_component: "Simulated_Boiler_Plant"
+    within_system_path: []
+    downstream_symptoms:
+      - system: sdahu
+        component: "AHU"
+        hint: "zone_temp_dropping"
+
+  hot_water_pressure_bias:
+    root_cause_component: "Pump_*"
+    within_system_path:
+      - component: "Simulated_Boiler_Plant"
+        hint: "hot_water_pressure_abnormal"
+        direction: "upstream"
+    downstream_symptoms: []
+
+  # ----- AHU Faults (single-system, short paths) -----
+  sa_bias:
+    root_cause_component: "AHU"
+    within_system_path: []
+    downstream_symptoms: []
+
+  oa_bias:
+    root_cause_component: "Outdoor_Air_Damper"
+    within_system_path:
+      - component: "AHU"
+        hint: "mixed_air_temp_abnormal"
+        direction: "upstream"
+    downstream_symptoms: []
+
+  coi_leakage:
+    root_cause_component: "Cooling_Coil"
+    within_system_path:
+      - component: "AHU"
+        hint: "supply_air_temp_below_setpoint"
+        direction: "upstream"
+    downstream_symptoms: []
+
+  coi_stuck:
+    root_cause_component: "Cooling_Coil"
+    within_system_path:
+      - component: "AHU"
+        hint: "supply_air_temp_above_setpoint"
+        direction: "upstream"
+    downstream_symptoms: []
+
+  damper_stuck:
+    root_cause_component: "Outdoor_Air_Damper"
+    within_system_path:
+      - component: "AHU"
+        hint: "mixed_air_temp_abnormal"
+        direction: "upstream"
+    downstream_symptoms: []
+
+# =============================================================================
+# Path generation settings
+# =============================================================================
+settings:
+  max_path_length: 6          # Maximum steps for 7B model
+  min_path_length: 2          # Minimum meaningful path
+  max_wrong_attempts: 2       # Max off-path detours per trajectory
+  cross_system_probability: 0.4  # Fraction of scenarios that start from downstream

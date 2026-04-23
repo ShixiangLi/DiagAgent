@@ -1,35 +1,80 @@
+# ==================================
 # Python
+# ==================================
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 *.egg-info/
 dist/
 build/
 *.egg
 
-# Virtual environment
-.venv/
+# ==================================
+# Virtual Environments
+# ==================================
 venv/
+.venv/
 env/
+.env/
 
-# IDE
+# ==================================
+# IDE & Editor
+# ==================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.project
+.settings/
+.classpath
 
-# Data & caches (large / regenerable)
-cache/
-data/lbnl/
-data/sft_data/
-data/rl_data/
-
-# Training outputs
-output/
-
+# ==================================
 # OS
-Thumbs.db
+# ==================================
 .DS_Store
+Thumbs.db
+desktop.ini
 
+# ==================================
+# Model Outputs (large files)
+# ==================================
+outputs/models/
+outputs/sft/
+outputs/rl/
+outputs/evaluation/
+outputs/topology/
+
+# ==================================
+# Generated Data (reproducible)
+# ==================================
+outputs/data/sft_train.jsonl
+outputs/data/sft_val.jsonl
+outputs/data/rl_train.jsonl
+outputs/data/rl_val.jsonl
+outputs/data/all_scenarios.json
+
+# ==================================
+# Raw Dataset (download separately)
+# ==================================
+data/lbnl/
+
+# ==================================
+# Logs & Temp
+# ==================================
+*.log
+wandb/
+runs/
+.gemini/
+
+# ==================================
 # Jupyter
+# ==================================
 .ipynb_checkpoints/
+*.ipynb
+
+# ==================================
+# Debug / Scratch scripts
+# ==================================
+scripts/_*.py

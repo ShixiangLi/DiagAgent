@@ -1,0 +1,13 @@
+{
+  "total_examples": 3000,
+  "format": "sharegpt",
+  "scenario_type_counts": {
+    "single_system": 1200,
+    "cross_system": 750,
+    "no_fault": 300,
+    "low_confidence": 450,
+    "ambiguous": 300
+  },
+  "avg_turns": 17.07,
+  "avg_tool_calls": 7.535
+}
