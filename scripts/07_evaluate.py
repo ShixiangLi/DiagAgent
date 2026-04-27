@@ -37,10 +37,16 @@ def main():
     parser.add_argument("--test-size", type=int, default=200)
     parser.add_argument("--test-ratio", type=float, default=0.1,
                         help="Fraction of SFT data to use as test set")
+    parser.add_argument("--sampling-strategy", default="stratified",
+                        choices=["stratified", "random"],
+                        help="Sampling strategy when --test-size is smaller than the test set")
+    parser.add_argument("--sampling-seed", type=int, default=42)
     parser.add_argument("--max-steps", type=int, default=15,
                         help="Maximum tool calls per episode")
     parser.add_argument("--prepare-test-data", action="store_true",
                         help="Only prepare test data, don't run evaluation")
+    parser.add_argument("--allow-mock", action="store_true",
+                        help="Allow mock evaluation if model loading fails")
     args = parser.parse_args()
 
     output_dir = ensure_dir(args.output_dir)
@@ -76,6 +82,9 @@ def main():
             output_dir=output_dir,
             max_episodes=args.test_size,
             max_steps=args.max_steps,
+            allow_mock=args.allow_mock,
+            sampling_strategy=args.sampling_strategy,
+            sampling_seed=args.sampling_seed,
         )
         eval_results.append(result)
 

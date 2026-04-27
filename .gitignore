@@ -78,3 +78,8 @@ runs/
 # Debug / Scratch scripts
 # ==================================
 scripts/_*.py
+
+# ==================================
+# Local Web Visualization
+# ==================================
+web-viz/

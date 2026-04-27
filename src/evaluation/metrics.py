@@ -19,6 +19,49 @@ from src.utils.io_utils import setup_logger
 logger = setup_logger(__name__)
 
 
+def _norm(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _parse_tool_results(ep: Dict) -> List[Dict[str, Any]]:
+    parsed = []
+    for raw in ep.get("tool_results", []):
+        try:
+            result = json.loads(raw)
+            if isinstance(result, dict):
+                parsed.append(result)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return parsed
+
+
+def _episode_has_abnormal_tool_result(ep: Dict) -> bool:
+    for result in _parse_tool_results(ep):
+        if _norm(result.get("status")) in ("fault", "warning", "abnormal"):
+            return True
+        for node_status in result.get("node_statuses", []):
+            if _norm(node_status.get("status")) in ("fault", "warning", "abnormal"):
+                return True
+        for node_status in result.get("candidate_nodes", []):
+            if _norm(node_status.get("status")) in ("fault", "warning", "abnormal"):
+                return True
+    return False
+
+
+def _extract_tool_calls(outputs: List[str]) -> List[Dict[str, Any]]:
+    calls = []
+    for text in outputs:
+        matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.DOTALL)
+        for tc_str in matches:
+            try:
+                tc = json.loads(tc_str)
+                if isinstance(tc, dict):
+                    calls.append(tc)
+            except json.JSONDecodeError:
+                calls.append({"_invalid": tc_str})
+    return calls
+
+
 def diagnostic_accuracy(episodes: List[Dict]) -> float:
     """
     DA: Fraction of episodes where root cause node AND fault type are correct.
@@ -33,14 +76,19 @@ def diagnostic_accuracy(episodes: List[Dict]) -> float:
         if diag is None:
             continue
 
-        gt_node = str(gt.get("root_cause_node", "")).lower()
-        gt_fault = str(gt.get("fault_type", "")).lower()
-        diag_node = str(diag.get("root_cause_node", "")).lower()
-        diag_fault = str(diag.get("fault_type", "")).lower()
+        gt_node = _norm(gt.get("root_cause_node", ""))
+        gt_fault = _norm(gt.get("fault_type", ""))
+        diag_node = _norm(diag.get("root_cause_node", ""))
+        diag_fault = _norm(diag.get("fault_type", ""))
 
         # Handle no-fault scenarios
-        if gt_fault == "normal" or gt_node == "none":
-            if "normal" in str(diag.get("status", "")).lower() or "none" in diag_fault:
+        is_no_fault = gt_fault in ("normal", "no_fault", "none", "") or gt_node in ("none", "")
+        if is_no_fault:
+            diag_all = (str(diag.get("status", "")) + " " + diag_fault).lower()
+            if (
+                any(kw in diag_all for kw in ("normal", "no fault", "no_fault", "none"))
+                and not _episode_has_abnormal_tool_result(ep)
+            ):
                 correct += 1
             continue
 
@@ -134,9 +182,12 @@ def search_efficiency(episodes: List[Dict]) -> float:
     efficiencies = []
     for ep in episodes:
         actual = ep.get("n_tool_calls", 0)
-        optimal = ep.get("optimal_path_length", 3)
+        optimal = ep.get(
+            "optimal_path_length",
+            ep.get("ground_truth", {}).get("optimal_path_length", 3),
+        )
 
-        if actual == 0:
+        if actual == 0 or ep.get("final_diagnosis") is None:
             efficiencies.append(0.0)
         else:
             efficiencies.append(min(1.0, optimal / actual))
@@ -234,48 +285,62 @@ def tool_invocation_rationality(episodes: List[Dict]) -> float:
     rational_calls = 0
 
     for ep in episodes:
-        outputs = ep.get("agent_outputs", [])
+        calls = _extract_tool_calls(ep.get("agent_outputs", []))
+        results = _parse_tool_results(ep)
         diagnosed_nodes: Set[str] = set()
+        queried_children: Set[str] = set()
+        discovered_nodes: Set[str] = set()
         found_fault = False
 
-        for text in outputs:
-            tc_matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.DOTALL)
+        for idx, tc in enumerate(calls):
+            total_calls += 1
+            is_rational = "_invalid" not in tc
 
-            for tc_str in tc_matches:
-                total_calls += 1
-                is_rational = True
+            tool_name = tc.get("name", "")
+            args = tc.get("arguments", {}) if isinstance(tc.get("arguments", {}), dict) else {}
 
-                try:
-                    tc = json.loads(tc_str)
-                    tool_name = tc.get("name", "")
-                    args = tc.get("arguments", {})
+            if idx == 0 and tool_name not in (
+                "get_system_overview", "get_node_children",
+                "get_node_status_summary",
+            ):
+                is_rational = False
 
-                    # Check 1: Not re-diagnosing already-checked nodes
-                    if tool_name == "diagnose_node":
-                        node_id = args.get("node_id", "")
-                        if node_id in diagnosed_nodes:
-                            is_rational = False  # Redundant check
-                        diagnosed_nodes.add(node_id)
+            if tool_name == "get_node_children":
+                node_id = args.get("node_id", "")
+                if node_id in queried_children:
+                    is_rational = False
+                queried_children.add(node_id)
 
-                    # Check 2: Logical progression
-                    # First call should be get_system_overview or get_node_children
-                    if total_calls == 1 and tool_name not in (
-                        "get_system_overview", "get_node_children",
-                        "get_node_status_summary"
-                    ):
-                        is_rational = False  # Should start with overview
-
-                    # Check 3: Don't explore topology after finding definitive root cause
-                    if found_fault and tool_name in (
-                        "get_system_overview", "get_related_systems"
-                    ):
-                        is_rational = False  # Should be concluding
-
-                except json.JSONDecodeError:
+            if tool_name == "diagnose_node":
+                node_id = args.get("node_id", "")
+                if node_id in diagnosed_nodes:
+                    is_rational = False
+                diagnosed_nodes.add(node_id)
+                if (
+                    discovered_nodes
+                    and not node_id.startswith("system::")
+                    and node_id not in discovered_nodes
+                ):
                     is_rational = False
 
-                if is_rational:
-                    rational_calls += 1
+            if found_fault and tool_name in (
+                "get_system_overview", "get_related_systems", "get_node_children",
+            ):
+                is_rational = False
+
+            if idx < len(results):
+                result = results[idx]
+                for child in result.get("children", []):
+                    if isinstance(child, dict) and child.get("node_id"):
+                        discovered_nodes.add(child["node_id"])
+                if _norm(result.get("status")) == "fault":
+                    found_fault = True
+
+            if is_rational:
+                rational_calls += 1
+
+        if calls and ep.get("final_diagnosis") is None:
+            total_calls += 1
 
     return rational_calls / max(total_calls, 1)
 

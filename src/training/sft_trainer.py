@@ -10,6 +10,7 @@ Implements LoRA-based fine-tuning with:
 
 import json
 import os
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
@@ -38,12 +39,12 @@ DEFAULT_SFT_CONFIG = {
 
     # Training hyperparameters
     "num_epochs": 3,
-    "per_device_train_batch_size": 4,
-    "gradient_accumulation_steps": 8,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 32,
     "learning_rate": 2e-5,
     "lr_scheduler_type": "cosine",
     "warmup_steps": 100,
-    "max_seq_length": 6144,
+    "max_seq_length": 16384,
     "weight_decay": 0.01,
     "bf16": True,
     "gradient_checkpointing": True,
@@ -55,6 +56,12 @@ DEFAULT_SFT_CONFIG = {
     "logging_steps": 10,
     "load_best_model_at_end": True,
     "metric_for_best_model": "eval_loss",
+    "select_best_by_diagnostic": True,
+    "diagnostic_best_metric": "aggregate_score",
+    "diag_eval_episodes": 64,
+    "diag_eval_max_steps": 15,
+    "diag_eval_sampling": "stratified",
+    "diag_eval_seed": 42,
 
     # Dataset
     "dataset_format": "sharegpt",  # "sharegpt" or "messages"
@@ -74,9 +81,37 @@ def load_sft_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 # Data Loading
 # ============================================================================
 
+def validate_sft_data(data: List[Dict]) -> Dict[str, int]:
+    """
+    Run quality pre-checks on loaded SFT data.
+
+    Checks for issues that would degrade training quality:
+    - Multiple <think> blocks in a single assistant turn
+    - Missing conversations or system prompt
+    """
+    import re
+    issues = {"multi_think": 0, "empty_conversations": 0, "missing_system": 0}
+
+    for entry in data:
+        if not entry.get("conversations"):
+            issues["empty_conversations"] += 1
+            continue
+        if not entry.get("system"):
+            issues["missing_system"] += 1
+
+        for conv in entry["conversations"]:
+            if conv.get("from") == "gpt":
+                val = conv.get("value", "")
+                think_count = len(re.findall(r"<think>", val))
+                if think_count > 1:
+                    issues["multi_think"] += 1
+
+    return issues
+
+
 def load_sft_dataset(data_path: str, max_samples: Optional[int] = None):
     """
-    Load the SFT dataset from JSONL file.
+    Load the SFT dataset from JSONL file with quality validation.
 
     Returns a HuggingFace Dataset object (or list of dicts if HF not available).
     """
@@ -89,6 +124,14 @@ def load_sft_dataset(data_path: str, max_samples: Optional[int] = None):
                     break
 
     logger.info(f"Loaded {len(data)} SFT training examples from {data_path}")
+
+    # Quality validation
+    issues = validate_sft_data(data)
+    for issue_name, count in issues.items():
+        if count > 0:
+            logger.warning(f"  Data quality issue: {issue_name} = {count}")
+    if all(v == 0 for v in issues.values()):
+        logger.info("  Data quality checks passed ✓")
 
     try:
         from datasets import Dataset
@@ -137,6 +180,15 @@ def split_train_eval(dataset, eval_ratio: float = 0.1, seed: int = 42):
     return data[:split_idx], data[split_idx:]
 
 
+def save_dataset_jsonl(dataset, output_path: str) -> str:
+    """Persist a raw dataset split as JSONL for diagnostic evaluation."""
+    ensure_dir(os.path.dirname(output_path))
+    with open(output_path, "w", encoding="utf-8") as f:
+        for i in range(len(dataset)):
+            f.write(json.dumps(dataset[i], ensure_ascii=False) + "\n")
+    return output_path
+
+
 # ============================================================================
 # Tokenization
 # ============================================================================
@@ -148,6 +200,12 @@ def build_tokenize_fn(tokenizer, max_seq_length: int):
     Applies Qwen chat template and masks non-assistant tokens with -100
     so that loss is only computed on the model's own generation.
     """
+
+    # Pre-compute role identifier token IDs for robust loss masking
+    im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    # Encode role identifier tokens ("assistant\n" following <|im_start|>)
+    assistant_role_ids = tokenizer.encode("assistant\n", add_special_tokens=False)
 
     def tokenize_sharegpt(examples):
         """Tokenize ShareGPT format conversations with assistant-only loss."""
@@ -182,31 +240,31 @@ def build_tokenize_fn(tokenizer, max_seq_length: int):
         input_ids = tokenized["input_ids"]
 
         # Create labels: mask non-assistant tokens with -100
+        # For Qwen2.5, assistant content is between:
+        #   <|im_start|>assistant\n ... <|im_end|>
+        # We use token-level scanning for robustness (no string decode needed)
         labels = [-100] * len(input_ids)
-
-        # Find assistant response spans and unmask them
-        # For Qwen2.5, assistant tokens are between <|im_start|>assistant and <|im_end|>
-        im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        role_len = len(assistant_role_ids)
 
         in_assistant = False
-        for i, token_id in enumerate(input_ids):
-            if token_id == im_start_id:
-                # Check if next tokens indicate "assistant"
-                remaining_text = tokenizer.decode(
-                    input_ids[i:min(i + 10, len(input_ids))]
-                )
-                if "assistant" in remaining_text.lower():
+        i = 0
+        while i < len(input_ids):
+            if input_ids[i] == im_start_id:
+                # Check if the tokens after im_start match "assistant\n"
+                after = input_ids[i + 1: i + 1 + role_len]
+                if after == assistant_role_ids:
                     in_assistant = True
+                    i += 1 + role_len  # Skip <|im_start|>assistant\n
                     continue
                 else:
                     in_assistant = False
-            elif token_id == im_end_id:
+            elif input_ids[i] == im_end_id:
                 if in_assistant:
-                    labels[i] = token_id  # Include the end token
+                    labels[i] = input_ids[i]  # Include the end token
                 in_assistant = False
             elif in_assistant:
-                labels[i] = token_id
+                labels[i] = input_ids[i]
+            i += 1
 
         return {
             "input_ids": input_ids,
@@ -285,6 +343,10 @@ def run_sft_training(config: Dict[str, Any]) -> str:
     dataset = load_sft_dataset(config["data_path"])
     eval_ratio = config.get("eval_split_ratio", 0.1)
     train_dataset, eval_dataset = split_train_eval(dataset, eval_ratio)
+    diag_eval_source_path = save_dataset_jsonl(
+        eval_dataset,
+        os.path.join(output_dir, "diag_eval_source.jsonl"),
+    )
 
     # ---- Tokenize datasets ----
     tokenize_fn = build_tokenize_fn(tokenizer, config["max_seq_length"])
@@ -354,12 +416,21 @@ def run_sft_training(config: Dict[str, Any]) -> str:
         """Run full Oracle-based diagnostic evaluation every eval_steps."""
 
         def __init__(self, model, tokenizer, eval_steps, output_dir,
-                     sft_data_path, diag_eval_episodes=50):
+                     sft_data_path, diag_eval_episodes=50,
+                     best_metric="aggregate_score",
+                     sampling_strategy="stratified",
+                     sampling_seed=42):
             self.model = model
             self.tokenizer = tokenizer
             self.eval_steps = eval_steps
             self.output_dir = output_dir
             self.diag_eval_episodes = diag_eval_episodes
+            self.best_metric = best_metric
+            self.sampling_strategy = sampling_strategy
+            self.sampling_seed = sampling_seed
+            self.best_score = -float("inf")
+            self.best_step = 0
+            self.best_diag_dir = os.path.join(output_dir, "best_diag")
             self.diag_history = []
 
             # Prepare test scenarios once
@@ -368,7 +439,7 @@ def run_sft_training(config: Dict[str, Any]) -> str:
                 from src.evaluation.evaluator import prepare_test_scenarios
                 prepare_test_scenarios(
                     sft_data_path, self.test_data_path,
-                    test_ratio=0.05, seed=42,
+                    test_ratio=1.0, seed=42,
                 )
                 self.enabled = True
                 logger.info(
@@ -403,9 +474,11 @@ def run_sft_training(config: Dict[str, Any]) -> str:
                     tokenizer=self.tokenizer,
                     test_scenarios_path=self.test_data_path,
                     max_episodes=self.diag_eval_episodes,
-                    max_steps=10,
+                    max_steps=config.get("diag_eval_max_steps", 15),
                     output_dir=episodes_dir,
                     step=step,
+                    sampling_strategy=self.sampling_strategy,
+                    sampling_seed=self.sampling_seed,
                 )
 
                 metrics = result.get("overall", {})
@@ -424,6 +497,26 @@ def run_sft_training(config: Dict[str, Any]) -> str:
                     os.path.join(self.output_dir, "diag_eval_history.json"),
                 )
 
+                score = metrics.get(self.best_metric, 0)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_step = step
+                    self.model.save_pretrained(self.best_diag_dir)
+                    self.tokenizer.save_pretrained(self.best_diag_dir)
+                    save_json(
+                        {
+                            "step": step,
+                            "metric": self.best_metric,
+                            "score": score,
+                            "metrics": metrics,
+                        },
+                        os.path.join(self.best_diag_dir, "diagnostic_best.json"),
+                    )
+                    logger.info(
+                        f"  New diagnostic best at step {step}: "
+                        f"{self.best_metric}={score:.4f}"
+                    )
+
             except Exception as e:
                 logger.warning(
                     f"Diagnostic eval failed at step {step}: "
@@ -435,8 +528,11 @@ def run_sft_training(config: Dict[str, Any]) -> str:
         tokenizer=tokenizer,
         eval_steps=config["eval_steps"],
         output_dir=output_dir,
-        sft_data_path=config["data_path"],
+        sft_data_path=diag_eval_source_path,
         diag_eval_episodes=config.get("diag_eval_episodes", 50),
+        best_metric=config.get("diagnostic_best_metric", "aggregate_score"),
+        sampling_strategy=config.get("diag_eval_sampling", "stratified"),
+        sampling_seed=config.get("diag_eval_seed", 42),
     )
 
     # ---- Train ----
@@ -463,19 +559,36 @@ def run_sft_training(config: Dict[str, Any]) -> str:
     trainer.train()
     elapsed = time.time() - start_time
 
-    # Save final/best model
-    best_dir = os.path.join(output_dir, "best")
-    model.save_pretrained(best_dir)
-    tokenizer.save_pretrained(best_dir)
-
-    # Also save final state
+    # Save final state. With HF load_best_model_at_end this is the best model
+    # according to metric_for_best_model, usually eval_loss.
     final_dir = os.path.join(output_dir, "final")
     model.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
 
+    # Save the RL starting checkpoint. Prefer the Oracle diagnostic best
+    # checkpoint because lower eval_loss has historically not guaranteed
+    # better diagnostic accuracy.
+    best_dir = os.path.join(output_dir, "best")
+    selected_best_source = "eval_loss"
+    if (
+        config.get("select_best_by_diagnostic", True)
+        and os.path.exists(os.path.join(diag_callback.best_diag_dir, "adapter_config.json"))
+    ):
+        if os.path.exists(best_dir):
+            shutil.rmtree(best_dir)
+        shutil.copytree(diag_callback.best_diag_dir, best_dir)
+        selected_best_source = "diagnostic"
+        logger.info(
+            f"Selected diagnostic best checkpoint from step "
+            f"{diag_callback.best_step} for {best_dir}"
+        )
+    else:
+        model.save_pretrained(best_dir)
+        tokenizer.save_pretrained(best_dir)
+
     logger.info(
         f"SFT training complete in {elapsed/3600:.1f}h. "
-        f"Best model saved to {best_dir}"
+        f"Best model saved to {best_dir} ({selected_best_source})"
     )
 
     # Save training summary
@@ -487,6 +600,12 @@ def run_sft_training(config: Dict[str, Any]) -> str:
         "train_samples": len(train_tokenized),
         "eval_samples": len(eval_tokenized),
         "best_checkpoint": best_dir,
+        "best_checkpoint_selection": selected_best_source,
+        "diagnostic_best_checkpoint": diag_callback.best_diag_dir,
+        "diagnostic_best_step": diag_callback.best_step,
+        "diagnostic_best_metric": config.get("diagnostic_best_metric", "aggregate_score"),
+        "diagnostic_best_score": diag_callback.best_score,
+        "diagnostic_eval_source": diag_eval_source_path,
         "final_checkpoint": final_dir,
         "max_seq_length": config["max_seq_length"],
         "eval_steps": config["eval_steps"],
@@ -533,11 +652,11 @@ def run_sft_training(config: Dict[str, Any]) -> str:
             prepare_test_scenarios,
         )
 
-        # Prepare test scenarios from training data
+        # Prepare test scenarios from the held-out SFT split.
         test_data_path = os.path.join(output_dir, "eval_test.jsonl")
-        sft_data_path = config["data_path"]
+        sft_data_path = diag_eval_source_path
         prepare_test_scenarios(
-            sft_data_path, test_data_path, test_ratio=0.1, seed=42,
+            sft_data_path, test_data_path, test_ratio=1.0, seed=42,
         )
 
         # Evaluate the best model
@@ -551,20 +670,30 @@ def run_sft_training(config: Dict[str, Any]) -> str:
             output_dir=eval_output_dir,
             max_steps=15,
             max_episodes=200,
+            sampling_strategy=config.get("diag_eval_sampling", "stratified"),
+            sampling_seed=config.get("diag_eval_seed", 42),
         )
 
         # Append diagnostic metrics to summary
-        if eval_result and "overall" in eval_result:
-            summary["diagnostic_metrics"] = eval_result["overall"]
+        overall_metrics = (
+            eval_result.get("overall_metrics")
+            or eval_result.get("overall")
+        )
+        if eval_result and overall_metrics:
+            summary["diagnostic_metrics"] = overall_metrics
             logger.info("Post-training diagnostic metrics:")
-            for metric, value in eval_result["overall"].items():
+            for metric, value in overall_metrics.items():
                 logger.info(f"  {metric}: {value:.4f}")
 
             # Per-type breakdown
-            if "by_type" in eval_result:
-                summary["diagnostic_metrics_by_type"] = eval_result["by_type"]
+            by_type = (
+                eval_result.get("metrics_by_scenario_type")
+                or eval_result.get("by_type")
+            )
+            if by_type:
+                summary["diagnostic_metrics_by_type"] = by_type
                 logger.info("By scenario type:")
-                for stype, metrics in eval_result["by_type"].items():
+                for stype, metrics in by_type.items():
                     da = metrics.get("diagnostic_accuracy", 0)
                     se = metrics.get("search_efficiency", 0)
                     logger.info(f"  {stype}: DA={da:.2f}  SE={se:.2f}")

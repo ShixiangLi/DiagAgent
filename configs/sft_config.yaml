@@ -17,13 +17,14 @@ target_modules:
   - down_proj
 
 # Training (optimized for RTX PRO 6000 96GB)
+# Longer sequences due to BFS node-discovery steps (~16 turns avg)
 num_epochs: 3
-per_device_train_batch_size: 2
-gradient_accumulation_steps: 16
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 32
 learning_rate: 2.0e-5
 lr_scheduler_type: cosine
 warmup_steps: 100
-max_seq_length: 6144
+max_seq_length: 16384
 weight_decay: 0.01
 bf16: true
 gradient_checkpointing: true
@@ -35,7 +36,12 @@ save_steps: 50
 logging_steps: 10
 load_best_model_at_end: true
 metric_for_best_model: "eval_loss"
-diag_eval_episodes: 50  # Full Oracle diagnostic eval per checkpoint
+diag_eval_episodes: 64  # Stratified Oracle diagnostic sample per eval step
+diag_eval_max_steps: 15
+diag_eval_sampling: "stratified"
+diag_eval_seed: 42
+select_best_by_diagnostic: true  # Promote best Oracle diagnostic checkpoint to outputs/sft/best
+diagnostic_best_metric: "aggregate_score"
 
 # Data
 dataset_format: "sharegpt"

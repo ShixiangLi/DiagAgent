@@ -1,5 +1,5 @@
 """
-Reasoning Composer — High-diversity compositional reasoning generation.
+Reasoning Composer - High-diversity compositional reasoning generation.
 
 Replaces fixed templates with a compositional approach:
   [Observation Summary] + [Reasoning Logic] + [Next Step Plan]
@@ -18,7 +18,7 @@ logger = setup_logger(__name__)
 
 
 # ============================================================================
-# Building blocks — each list should have 8-15+ variants
+# Building blocks - each list should have 8-15+ variants
 # ============================================================================
 
 # --- Initial reasoning (first turn) ---
@@ -55,7 +55,7 @@ _SYS_SELECT_STARTERS = [
     "I'll start by drilling into the {system_name} ({system_id}) system to check its components.",
     "The {system_name} system is the most likely source given the symptom profile. Let me get its component list.",
     "Given the nature of the alert, the {system_name} ({system_id}) is a strong candidate. Let me inspect it.",
-    "I'll focus on the {system_name} system first — it matches the symptom signature.",
+    "I'll focus on the {system_name} system first - it matches the symptom signature.",
     "The symptom pattern is consistent with {system_name} issues. Retrieving its component tree.",
     "Starting my investigation with {system_name} ({system_id}) as it's the primary suspect based on the symptom location.",
 ]
@@ -72,7 +72,7 @@ _DIAGNOSE_PRE = [
     "Running fault detection on {node_name} using the sensor data.",
     "I'll check whether {node_name} is operating within expected parameters.",
     "Performing diagnostic analysis on {node_name} to assess its health.",
-    "Next, I should examine {node_name} — it's a potential contributor to the observed symptoms.",
+    "Next, I should examine {node_name} - it's a potential contributor to the observed symptoms.",
     "Let me evaluate {node_name}'s sensor readings against the trained model baseline.",
     "I'll investigate {node_name} to determine if it's functioning correctly.",
 ]
@@ -81,7 +81,7 @@ _DIAGNOSE_PRE = [
 
 _NORMAL_OBSERVATIONS = [
     "The diagnostic model reports {node_name} is operating normally with {confidence:.1%} confidence.",
-    "Results show {node_name} is healthy — {confidence:.1%} confidence in normal operation.",
+    "Results show {node_name} is healthy - {confidence:.1%} confidence in normal operation.",
     "The Oracle confirms {node_name} has no anomalies (confidence: {confidence:.1%}).",
     "{node_name} passed the diagnostic check with {confidence:.1%} normal-status confidence.",
     "Sensor analysis indicates {node_name} is within normal operating ranges ({confidence:.1%}).",
@@ -106,19 +106,19 @@ _NORMAL_CONCLUSIONS = [
 _ABNORMAL_OBSERVATIONS = [
     "{node_name} shows abnormal behavior: {hint}.",
     "The diagnostics indicate {node_name} has anomalous readings: {hint}.",
-    "{node_name} is exhibiting abnormality — {hint}.",
+    "{node_name} is exhibiting abnormality - {hint}.",
     "Alert: {node_name} returned an Abnormal status. Indicators show {hint}.",
     "The model detected anomalous conditions at {node_name}: {hint}.",
     "Something's off with {node_name}. The analysis shows: {hint}.",
     "{node_name} deviates from normal: {hint}.",
-    "Anomaly detected at {node_name} — the Oracle flags: {hint}.",
+    "Anomaly detected at {node_name} - the Oracle flags: {hint}.",
 ]
 
 _ABNORMAL_REASONING = [
     "However, the abnormality pattern suggests this node is showing symptoms rather than being the root cause.",
     "The suggested direction is {direction}, indicating the root cause is {direction} of this component.",
     "This is likely a downstream effect. The fault probably originates {direction}.",
-    "This component is affected but not the source — the issue propagates from {direction}.",
+    "This component is affected but not the source - the issue propagates from {direction}.",
     "Based on the abnormality pattern, I should trace {direction} to find the primary fault.",
     "The abnormal readings here are consistent with a propagation effect from {direction}.",
     "This node is experiencing collateral impact. The actual fault is likely {direction}.",
@@ -156,31 +156,46 @@ def compose_fault_found(
     sensor_readings: Dict[str, float],
     rng: random.Random,
 ) -> str:
-    """Compose a fault-found reasoning block WITH sensor evidence."""
+    """Compose a fault-found reasoning block WITH sensor evidence.
 
-    _FAULT_OPENERS = [
-        f"Root cause identified! {node_name} has a definitive fault: {fault_type} (confidence: {confidence:.1%}).",
-        f"The diagnostics confirm {node_name} is the source of the problem: {fault_type} detected with {confidence:.1%} confidence.",
-        f"Found it — {node_name} has {fault_type}. This explains the downstream symptoms observed earlier.",
-        f"Confirmed: {node_name} is experiencing {fault_type} with {confidence:.1%} certainty.",
-        f"The fault model has positively identified {fault_type} at {node_name} ({confidence:.1%} confidence).",
-        f"Definitive diagnosis: {node_name} is the root cause, exhibiting {fault_type} at {confidence:.1%} confidence.",
-        f"After systematic investigation, {node_name} is confirmed as the fault source: {fault_type}.",
-        f"The evidence points conclusively to {node_name} — {fault_type} detected with {confidence:.1%} confidence.",
-    ]
+    Uses confidence-appropriate language:
+    - High (>=0.7): definitive/confirmed
+    - Medium (0.5-0.7): likely/probable
+    - Low (<0.5): possible/candidate
+    """
+
+    if confidence >= 0.7:
+        _FAULT_OPENERS = [
+            f"Root cause identified! {node_name} has a definitive fault: {fault_type} (confidence: {confidence:.1%}).",
+            f"The diagnostics confirm {node_name} is the source of the problem: {fault_type} detected with {confidence:.1%} confidence.",
+            f"Found it - {node_name} has {fault_type}. This explains the downstream symptoms observed earlier.",
+            f"Confirmed: {node_name} is experiencing {fault_type} with {confidence:.1%} certainty.",
+            f"The fault model has positively identified {fault_type} at {node_name} ({confidence:.1%} confidence).",
+        ]
+    elif confidence >= 0.5:
+        _FAULT_OPENERS = [
+            f"Likely root cause: {node_name} shows {fault_type} (confidence: {confidence:.1%}). This is the strongest candidate.",
+            f"The Oracle flags {node_name} as the probable source: {fault_type} at {confidence:.1%} confidence.",
+            f"{node_name} is the most likely fault source - {fault_type} detected with moderate confidence ({confidence:.1%}).",
+            f"Diagnosis points to {node_name}: {fault_type} ({confidence:.1%}). While not conclusive, this is the top prediction.",
+        ]
+    else:
+        _FAULT_OPENERS = [
+            f"Possible root cause at {node_name}: {fault_type} (confidence: {confidence:.1%}). This is the top candidate despite low certainty.",
+            f"The Oracle's best prediction is {fault_type} at {node_name} ({confidence:.1%} confidence). Further evidence needed to confirm.",
+            f"{node_name} shows signs of {fault_type} ({confidence:.1%}). This is a low-confidence detection but the strongest signal available.",
+            f"Primary candidate: {fault_type} at {node_name} with {confidence:.1%} confidence. The model is uncertain but this is the most plausible fault.",
+        ]
 
     opener = rng.choice(_FAULT_OPENERS)
 
     # Build evidence citation from sensor readings
-    evidence = _format_sensor_evidence(sensor_readings, rng)
+    evidence = _format_sensor_evidence(sensor_readings, rng, fault_type=fault_type)
     if evidence:
         _EVIDENCE_INTROS = [
-            f"Key sensor evidence: {evidence}.",
-            f"Supporting data: {evidence}.",
             f"The sensor readings confirm this: {evidence}.",
             f"Relevant measurements: {evidence}.",
-            f"This is supported by the sensor data — {evidence}.",
-            f"The abnormal readings that led to this conclusion: {evidence}.",
+            f"Supporting data: {evidence}.",
         ]
         evidence_text = rng.choice(_EVIDENCE_INTROS)
     else:
@@ -248,7 +263,7 @@ def compose_no_fault_conclusion(
         f"The system appears to be operating within expected parameters.",
 
         f"No faults were detected during this investigation. "
-        f"I examined {nodes_str} — all passed health checks with high confidence.",
+        f"I examined {nodes_str} - all passed health checks with high confidence.",
 
         f"The diagnostic sweep across {nodes_str} found no anomalies. "
         f"All sensor readings fall within normal operating ranges.",
@@ -263,7 +278,7 @@ def compose_no_fault_conclusion(
         f"The reported symptoms may have been transient or caused by external factors.",
 
         f"Comprehensive diagnosis of {nodes_str} reveals normal operation across the board. "
-        f"No root cause identified — the system is functioning as expected.",
+        f"No root cause identified - the system is functioning as expected.",
     ]
     return rng.choice(_NO_FAULT)
 
@@ -297,7 +312,7 @@ def compose_wrong_system_ack(
             f"{node_name} in the {system_name} system is operating normally ({confidence:.1%}). "
             f"This system is not the source of the reported issue. Let me investigate the system indicated by the symptoms.",
 
-            f"The {system_name} system checks out — {node_name} is healthy ({confidence:.1%}). "
+            f"The {system_name} system checks out - {node_name} is healthy ({confidence:.1%}). "
             f"I can eliminate this system and focus elsewhere.",
 
             f"No issues found in {system_name}: {node_name} returned normal status ({confidence:.1%}). "
@@ -311,7 +326,7 @@ def compose_wrong_system_ack(
         ]
     else:
         _ACKS = [
-            f"Interesting — {node_name} in {system_name} shows {actual_status} status. "
+            f"Interesting - {node_name} in {system_name} shows {actual_status} status. "
             f"However, this may be a secondary effect. Let me continue investigating the primary suspect system.",
 
             f"{node_name} in {system_name} returned {actual_status}. "
@@ -376,7 +391,7 @@ def compose_upstream_ack(
         f"Upstream analysis shows {to_name} as a potential source for {from_name}'s issues. "
         f"Switching focus to {to_name}.",
 
-        f"The topology confirms {to_name} → {from_name} dependency. "
+        f"The topology confirms {to_name} -> {from_name} dependency. "
         f"The root cause likely originates in {to_name}. Continuing there.",
 
         f"Cross-system dependency identified: {to_name} supplies {from_name}. "
@@ -389,22 +404,113 @@ def compose_upstream_ack(
 # Sensor evidence formatting
 # ============================================================================
 
+# Fault-type -> causally relevant sensor prefixes (priority order)
+_FAULT_SENSOR_PRIORITY: Dict[str, List[str]] = {
+    # RTU / DX faults - compressor, capacity, supply air are relevant
+    "condfouling":   ["COND", "COMP", "RTU_SEN_CAPA", "RTU_SA_TEMP", "RTU_TOT", "RTU_SA_FLOW"],
+    "evapfouling":   ["EVAP", "COMP", "RTU_SEN_CAPA", "RTU_SA_TEMP", "RTU_TOT", "RTU_SA_FLOW"],
+    "overcharge":    ["COMP", "RTU_SEN_CAPA", "RTU_SA_TEMP", "RTU_TOT", "RTU_SA_FLOW"],
+    "undercharge":   ["COMP", "RTU_SEN_CAPA", "RTU_SA_TEMP", "RTU_TOT", "RTU_SA_FLOW"],
+    "liquidpipe":    ["COMP", "RTU_SEN_CAPA", "RTU_SA_TEMP", "RTU_TOT"],
+    "suctionpipe":   ["COMP", "RTU_SEN_CAPA", "RTU_SA_TEMP", "RTU_TOT"],
+    # Boiler faults - hot water loop sensors
+    "boiler":        ["HWL", "SEC_POW", "PM_", "HWP"],
+    "hot_water":     ["HWL", "SEC_POW", "PM_", "HWP"],
+    # Chiller faults - chilled/condenser water sensors (NOT OA_TEMP)
+    "chiller":       ["CWL", "CT_", "CHWST", "CHWRT", "CHILLER", "GPM"],
+    "bypass":        ["CWL", "CHWST", "CHWRT", "BYPASS", "CHILLER", "GPM"],
+    "coolingtower":  ["CT_", "CWL", "COND", "CHWST", "CHWRT"],
+    "secondary_chilled": ["CWL", "CHWST", "CHWRT", "GPM", "CT_"],
+    # AHU faults - coil, damper, airflow sensors
+    "DMPRStuck":     ["OA_CFM", "MA_TEMP", "DMPR", "SA_TEMP", "SA_", "RA_TEMP"],
+    "VLVStuck":      ["CHWC", "HWC", "VLV", "SA_TEMP", "MA_TEMP", "GPM"],
+    "Fouling":       ["CHWC", "HWC", "VLV", "EWT", "LWT", "SA_TEMP", "MA_TEMP", "DAT"],
+    "SensorBias":    ["TEMP", "CFM", "HUMD", "SPT", "SA_", "RA_", "MA_", "DAT"],
+    "Reheat":        ["RH_", "VAV", "DAT", "HWP"],
+    "VAVDMPRStuck":  ["VAV", "CFM", "DAT", "DMPR"],
+}
+
+
 def _format_sensor_evidence(
     sensor_readings: Dict[str, float],
     rng: random.Random,
     max_sensors: int = 3,
+    fault_type: Optional[str] = None,
 ) -> str:
-    """Format sensor readings into a human-readable evidence string."""
+    """Format sensor readings into a human-readable evidence string.
+
+    When *fault_type* is provided, sensors causally related to the fault
+    are prioritised so that cited evidence is domain-appropriate.
+
+    Post-processing:
+    - Clamps WB ≤ DB (wet-bulb cannot exceed dry-bulb)
+    - Rejects environment-only sensors (OA_TEMP*) as sole evidence for
+      process faults (bypass, chiller, coolingtower)
+    """
     if not sensor_readings:
         return ""
 
-    # Pick up to max_sensors to cite
-    sensors = list(sensor_readings.items())
-    if len(sensors) > max_sensors:
-        sensors = rng.sample(sensors, max_sensors)
+    # Physical constraint: clamp WB ≤ DB
+    readings = dict(sensor_readings)
+    if "OA_TEMP" in readings and "OA_TEMP_WB" in readings:
+        db = readings["OA_TEMP"]
+        wb = readings["OA_TEMP_WB"]
+        if isinstance(db, (int, float)) and isinstance(wb, (int, float)):
+            if wb > db:
+                readings["OA_TEMP_WB"] = round(db - rng.uniform(2.0, 5.0), 4)
+
+    # Physical constraint: airflow and water-flow sensors cannot be negative.
+    for key, value in list(readings.items()):
+        key_upper = key.upper()
+        is_flow = any(token in key_upper for token in ("CFM", "FLOW", "GPM"))
+        if is_flow and isinstance(value, (int, float)) and value < 0:
+            readings[key] = 0.0
+
+    all_sensors = list(readings.items())
+
+    # --- prioritise causally relevant sensors ---
+    priority_prefixes: List[str] = []
+    if fault_type:
+        ft_lower = fault_type.lower()
+        for key, prefixes in _FAULT_SENSOR_PRIORITY.items():
+            if key.lower() in ft_lower or ft_lower in key.lower():
+                priority_prefixes = prefixes
+                break
+
+    if priority_prefixes:
+        # Split into high / low priority
+        high = [(n, v) for n, v in all_sensors
+                if any(n.upper().startswith(p.upper()) or p.upper() in n.upper()
+                       for p in priority_prefixes)]
+        low  = [(n, v) for n, v in all_sensors if (n, v) not in high]
+
+        # Pick from high-priority first, fill with low-priority if needed
+        if len(high) >= max_sensors:
+            selected = rng.sample(high, max_sensors)
+        elif high:
+            needed = max_sensors - len(high)
+            extra = rng.sample(low, min(needed, len(low))) if low else []
+            selected = high + extra
+        else:
+            # No causally relevant sensors available at all
+            # Return empty -> caller will use generic evidence string
+            return ""
+    else:
+        # No fault type info - fall back to random sample
+        if len(all_sensors) > max_sensors:
+            selected = rng.sample(all_sensors, max_sensors)
+        else:
+            selected = all_sensors
+
+    # Final guard: reject if ALL selected sensors are environment-only (OA_*)
+    env_prefixes = ("OA_TEMP", "OA_HUMD")
+    non_env = [n for n, _ in selected if not any(n.startswith(p) for p in env_prefixes)]
+    if not non_env and fault_type:
+        # All sensors are environment - not valid for process faults
+        return ""
 
     parts = []
-    for name, value in sensors:
+    for name, value in selected:
         if isinstance(value, float):
             parts.append(f"{name}={value:.2f}")
         else:
@@ -451,13 +557,14 @@ def compose_normal_response(
     # Optionally cite a sensor reading as evidence
     if sensor_readings and rng.random() < 0.6:
         evidence = _format_sensor_evidence(sensor_readings, rng, max_sensors=2)
-        _EVIDENCE_PHRASES = [
-            f"Key readings: {evidence} — all within acceptable ranges.",
-            f"Sensor check: {evidence} (nominal).",
-            f"Verified by sensor data: {evidence}.",
-        ]
-        evidence_text = rng.choice(_EVIDENCE_PHRASES)
-        return f"{obs} {evidence_text} {conclusion}"
+        if evidence:
+            _EVIDENCE_PHRASES = [
+                f"Key readings: {evidence} - all within acceptable ranges.",
+                f"Sensor check: {evidence} (nominal).",
+                f"Verified by sensor data: {evidence}.",
+            ]
+            evidence_text = rng.choice(_EVIDENCE_PHRASES)
+            return f"{obs} {evidence_text} {conclusion}"
 
     return f"{obs} {conclusion}"
 
@@ -479,13 +586,14 @@ def compose_abnormal_response(
     # Include sensor evidence
     if sensor_readings and rng.random() < 0.7:
         evidence = _format_sensor_evidence(sensor_readings, rng, max_sensors=2)
-        _EVIDENCE_PHRASES = [
-            f"Relevant readings: {evidence}.",
-            f"Sensor data: {evidence}.",
-            f"The measurements show: {evidence}.",
-        ]
-        evidence_text = rng.choice(_EVIDENCE_PHRASES)
-        return f"{obs} {evidence_text} {reasoning} {next_step}"
+        if evidence:
+            _EVIDENCE_PHRASES = [
+                f"Relevant readings: {evidence}.",
+                f"Sensor data: {evidence}.",
+                f"The measurements show: {evidence}.",
+            ]
+            evidence_text = rng.choice(_EVIDENCE_PHRASES)
+            return f"{obs} {evidence_text} {reasoning} {next_step}"
 
     return f"{obs} {reasoning} {next_step}"
 
@@ -498,3 +606,297 @@ def compose_upstream_trace(node_name: str, rng: random.Random) -> str:
 def compose_wrong_system(system_name: str, rng: random.Random) -> str:
     """Compose a wrong-system check reasoning."""
     return rng.choice(_WRONG_SYSTEM_REASONING).format(system_name=system_name)
+
+
+# ============================================================================
+# New reasoning blocks - anomaly-score & exploration
+# ============================================================================
+
+def compose_anomaly_score_selection(
+    system_name: str,
+    system_id: str,
+    anomaly_score: float,
+    rng: random.Random,
+) -> str:
+    """Compose system selection reasoning based on anomaly score."""
+    pct = f"{anomaly_score:.0%}"
+    if anomaly_score <= 0.05:
+        _NORMAL_SELECTIONS = [
+            f"The system overview shows {system_name} ({system_id}) is not elevated "
+            f"({pct} anomaly score). Since the user asked about this system, I will "
+            f"verify its components directly.",
+
+            f"{system_name} ({system_id}) has a normal overview score ({pct}). "
+            f"I should still inspect it because the request names this system.",
+
+            f"The overview does not flag {system_name}; its anomaly score is {pct}. "
+            f"I will perform a targeted health check rather than treating it as a "
+            f"primary fault suspect.",
+
+            f"All evidence so far keeps {system_name} at a normal anomaly level "
+            f"({pct}). I will continue with a limited verification of its components.",
+        ]
+        return rng.choice(_NORMAL_SELECTIONS)
+
+    _SELECTIONS = [
+        f"The system overview shows {system_name} ({system_id}) has the highest "
+        f"anomaly score ({pct}). This makes it the primary investigation target.",
+
+        f"Based on the anomaly scores, {system_name} stands out with {pct} - "
+        f"significantly higher than other systems. I should start investigating here.",
+
+        f"{system_name} ({system_id}) has an anomaly score of {pct}, "
+        f"indicating potential issues. Let me examine its components.",
+
+        f"The health indicators show {system_name} at {pct} anomaly level. "
+        f"This is the most likely fault source. Let me drill into its components.",
+
+        f"Analyzing the system overview: {system_name} ({pct} anomaly) is the "
+        f"top priority. Other systems show lower scores. Focusing investigation here.",
+
+        f"The Oracle's system-level analysis flags {system_name} with a {pct} "
+        f"anomaly score. I'll begin my investigation with this system.",
+
+        f"System health check reveals {system_name} as the primary suspect "
+        f"(anomaly: {pct}). Let me get its component list.",
+    ]
+    return rng.choice(_SELECTIONS)
+
+
+def compose_multi_system_ranking(
+    systems_ranked: list,  # [(name, id, score), ...]
+    rng: random.Random,
+) -> str:
+    """Compose reasoning about multiple systems with anomaly scores."""
+    if not systems_ranked:
+        return "Let me examine the building systems."
+
+    top = systems_ranked[0]
+    descriptions = [f"{n} ({s:.0%})" for n, _, s in systems_ranked[:3]]
+    ranked_str = ", ".join(descriptions)
+
+    _RANKINGS = [
+        f"System overview anomaly rankings: {ranked_str}. "
+        f"I'll start with {top[0]} as it has the highest anomaly score.",
+
+        f"Multiple systems show elevated anomaly scores: {ranked_str}. "
+        f"Prioritizing {top[0]} for investigation.",
+
+        f"The health scan reveals several systems of interest: {ranked_str}. "
+        f"Beginning with {top[0]} - the most anomalous.",
+
+        f"Anomaly analysis shows: {ranked_str}. "
+        f"I'll investigate {top[0]} first, then check others if needed.",
+    ]
+    return rng.choice(_RANKINGS)
+
+
+def compose_system_elimination(
+    eliminated_system: str,
+    n_nodes_checked: int,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning after eliminating a system (all nodes Normal)."""
+    _ELIMINATIONS = [
+        f"After checking {n_nodes_checked} components in {eliminated_system}, "
+        f"all returned Normal status. This system can be ruled out as the fault source. "
+        f"I need to investigate the next candidate system.",
+
+        f"{eliminated_system} is clear - {n_nodes_checked} components checked, "
+        f"all healthy. The fault must be elsewhere. Let me move to the next system.",
+
+        f"No faults found in {eliminated_system} after checking {n_nodes_checked} nodes. "
+        f"Eliminating this system and redirecting investigation.",
+
+        f"Investigation of {eliminated_system} complete: {n_nodes_checked} components, "
+        f"zero faults. The anomaly score may have been a false positive. "
+        f"Proceeding to the next highest-scoring system.",
+
+        f"{eliminated_system} shows normal operation across all {n_nodes_checked} "
+        f"checked components. Pivoting to the next system in my priority list.",
+    ]
+    return rng.choice(_ELIMINATIONS)
+
+
+def compose_system_pivot(
+    from_system: str,
+    to_system: str,
+    to_score: float,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning for pivoting from an eliminated system to the next."""
+    pct = f"{to_score:.0%}"
+    _PIVOTS = [
+        f"Since {from_system} is clear, I'll now investigate {to_system} "
+        f"(anomaly score: {pct}). This is the next highest priority.",
+
+        f"Moving investigation from {from_system} to {to_system} ({pct} anomaly). "
+        f"Let me get its component structure.",
+
+        f"With {from_system} eliminated, {to_system} becomes the primary suspect "
+        f"(anomaly: {pct}). Switching focus.",
+
+        f"No issues in {from_system}. Next candidate: {to_system} at {pct} "
+        f"anomaly score. Let me examine its components.",
+
+        f"Redirecting from {from_system} (clear) to {to_system} (anomaly: {pct}). "
+        f"The anomaly score suggests potential issues in this system.",
+    ]
+    return rng.choice(_PIVOTS)
+
+
+def compose_status_summary_request(system_name: str, rng: random.Random) -> str:
+    """Compose reasoning for using the system-wide status summary tool."""
+    options = [
+        f"Before probing components one by one, I should get a system-wide status summary for {system_name} to prioritize the most suspicious nodes.",
+        f"A quick component status summary for {system_name} will help avoid an inefficient blind sweep.",
+        f"I'll ask the Oracle for a status summary across {system_name} so I can focus on candidate components first.",
+        f"To narrow the search efficiently, I need a node status summary for {system_name}.",
+    ]
+    return rng.choice(options)
+
+
+def compose_status_summary_ack(
+    system_name: str,
+    candidate_count: int,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning after receiving a system status summary."""
+    if candidate_count > 0:
+        options = [
+            f"The {system_name} summary highlights {candidate_count} candidate node(s). I should verify the strongest candidate directly.",
+            f"The status summary narrows {system_name} to {candidate_count} non-normal node(s), so I can avoid scanning unrelated components.",
+            f"{system_name} has {candidate_count} candidate node(s) in the summary. I'll drill into those rather than sweeping the whole system.",
+        ]
+    else:
+        options = [
+            f"The {system_name} summary shows no non-normal candidates. I should either verify representative nodes or pivot to a related system.",
+            f"No candidate nodes appear in the {system_name} status summary, so a limited verification is enough before moving on.",
+            f"The summary for {system_name} is clean. I can avoid a full component sweep unless other evidence points back here.",
+        ]
+    return rng.choice(options)
+
+
+def compose_related_systems_request(system_name: str, rng: random.Random) -> str:
+    """Compose reasoning for querying cross-system relationships."""
+    options = [
+        f"The symptoms may propagate across systems, so I should check which systems are connected to {system_name}.",
+        f"Before jumping systems, I need the cross-system connections for {system_name}.",
+        f"A related-systems query will show whether {system_name} is being fed by an upstream plant or feeding downstream equipment.",
+        f"To trace propagation cleanly, I'll inspect the systems related to {system_name}.",
+    ]
+    return rng.choice(options)
+
+
+def compose_related_systems_ack(
+    from_system: str,
+    to_system: str,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning after related-system topology is returned."""
+    options = [
+        f"The related-system topology links {from_system} with {to_system}. I should inspect {to_system} next as the likely propagation source.",
+        f"The connection map supports a transition from {from_system} to {to_system}; this is the correct direction for root-cause tracing.",
+        f"With the cross-system relationship confirmed, {to_system} becomes the next diagnostic target.",
+    ]
+    return rng.choice(options)
+
+
+def compose_related_systems_impact_request(
+    system_name: str,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning for checking propagation scope after a root fault."""
+    options = [
+        f"Since the fault can propagate beyond {system_name}, I should check its related systems before finalizing impact.",
+        f"Before closing the diagnosis, I need the cross-system connection map for {system_name}.",
+        f"The root fault is localized, but the affected-system scope depends on cross-system links from {system_name}.",
+        f"I will inspect related systems for {system_name} to verify how this fault can affect downstream equipment.",
+    ]
+    return rng.choice(options)
+
+
+def compose_related_systems_impact_ack(
+    system_name: str,
+    upstream_count: int,
+    downstream_count: int,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning after related-system impact topology is returned."""
+    options = [
+        f"The related-system map for {system_name} shows {downstream_count} downstream and {upstream_count} upstream connection(s), which constrains the affected-system list.",
+        f"Cross-system topology is now checked for {system_name}: {downstream_count} downstream connection(s), {upstream_count} upstream connection(s). I can use this to report propagation scope.",
+        f"The connection map confirms the impact boundary around {system_name}; downstream links are the relevant propagation path for this root fault.",
+    ]
+    return rng.choice(options)
+
+
+def compose_warning_response(
+    node_name: str,
+    confidence: float,
+    sensor_readings: Dict[str, float],
+    rng: random.Random,
+) -> str:
+    """Compose reasoning when Oracle returns Warning (low confidence)."""
+    pct = f"{confidence:.1%}"
+    _WARNINGS = [
+        f"The Oracle reports a borderline result for {node_name} - "
+        f"confidence is only {pct}, below the definitive threshold. "
+        f"I should verify this with raw sensor data before concluding.",
+
+        f"{node_name} returned a Warning status at {pct} confidence. "
+        f"This is inconclusive. I need to cross-check with the actual "
+        f"sensor readings to confirm or rule out a fault.",
+
+        f"Interesting - {node_name} shows a Warning but the model is only "
+        f"{pct} confident. The result is ambiguous. Let me examine the "
+        f"sensor data directly to get more evidence.",
+
+        f"The diagnostic model is uncertain about {node_name} ({pct}). "
+        f"A low-confidence Warning doesn't confirm a fault. "
+        f"Sensor-level verification is needed.",
+
+        f"{node_name}: Warning status detected, but confidence ({pct}) is "
+        f"below the reliable threshold. I should check the actual sensor "
+        f"readings to make an evidence-based determination.",
+    ]
+
+    result = rng.choice(_WARNINGS)
+
+    # Add sensor evidence if available
+    if sensor_readings and rng.random() < 0.5:
+        evidence = _format_sensor_evidence(sensor_readings, rng, max_sensors=2)
+        if evidence:
+            result += f" Current readings: {evidence}."
+
+    return result
+
+
+def compose_sensor_verification(
+    node_name: str,
+    sensor_findings: str,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning after examining sensors to verify a Warning."""
+    _VERIFICATIONS = [
+        f"Sensor analysis for {node_name}: {sensor_findings}. "
+        f"Combined with the Oracle's Warning, this provides sufficient "
+        f"evidence to confirm the diagnosis.",
+
+        f"After examining the sensor data, {sensor_findings}. "
+        f"Despite the Oracle's low confidence, the sensor evidence "
+        f"supports a fault determination at {node_name}.",
+
+        f"Cross-referencing sensor data with the Warning: {sensor_findings}. "
+        f"The sensor deviations corroborate the Oracle's suspicion. "
+        f"I can now make a more confident diagnosis.",
+
+        f"Sensor verification complete: {sensor_findings}. "
+        f"The data confirms abnormal operation at {node_name}, "
+        f"validating the Oracle's borderline detection.",
+
+        f"The raw sensor readings ({sensor_findings}) confirm the anomaly "
+        f"flagged by the Oracle at {node_name}. "
+        f"The fault is real despite the low model confidence.",
+    ]
+    return rng.choice(_VERIFICATIONS)

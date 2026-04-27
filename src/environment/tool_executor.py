@@ -31,6 +31,9 @@ class UnifiedToolExecutor:
         self.topo_executor = topo_executor
         self.pred_executor = pred_executor
 
+        # Wire health_provider: give topology access to prediction for anomaly scores
+        self.topo_executor._health_provider = self.pred_executor
+
         # Build unified tool name → executor mapping
         self._tool_router: Dict[str, Any] = {}
         for schema in TOPOLOGY_TOOL_SCHEMAS:
@@ -66,3 +69,4 @@ class UnifiedToolExecutor:
     def get_available_tools(self) -> list:
         """Return list of available tool names."""
         return list(self._tool_router.keys())
+

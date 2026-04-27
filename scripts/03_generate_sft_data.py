@@ -26,6 +26,7 @@ from src.data_gen.scenario_sampler import (
     sample_scenarios,
     create_ambiguous_scenarios,
     create_low_confidence_scenarios,
+    create_no_fault_scenarios,
 )
 from src.data_gen.trajectory_generator import generate_batch_trajectories
 from src.data_gen.sft_formatter import format_sft_dataset
@@ -53,7 +54,7 @@ def main():
     parser.add_argument("--data-root", default="data/lbnl")
     parser.add_argument("--models-dir", default="outputs/models")
     parser.add_argument("--output-dir", default="outputs/data")
-    parser.add_argument("--n-total", type=int, default=15000)
+    parser.add_argument("--n-total", type=int, default=3000)
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--sample-size", type=int, default=None,
                         help="Generate only this many for quick testing")
@@ -106,6 +107,10 @@ def main():
     low_conf = create_low_confidence_scenarios(all_scenarios)
     all_scenarios.extend(low_conf)
 
+    # Generate no_fault scenarios (Non-Ambiguous only)
+    no_fault = create_no_fault_scenarios(all_scenarios)
+    all_scenarios.extend(no_fault)
+
     logger.info(f"Total scenarios generated: {len(all_scenarios)}")
 
     # Save all scenarios
@@ -121,6 +126,24 @@ def main():
     from src.node_models.data_loader import discover_fault_files
     from src.environment.fault_scenario import create_scenario_state
 
+    # For no_fault scenarios, override source_file to use fault-free CSV
+    # This ensures Oracle genuinely predicts Normal from baseline data
+    normal_file_map = {}  # system_id → fault-free filename
+    for sys_id in config["systems"]:
+        fault_files = discover_fault_files(args.data_root, sys_id)
+        for ff in fault_files:
+            if ff.fault_type.lower() == "normal":
+                normal_file_map[sys_id] = ff.filename
+                break
+
+    for s in sampled:
+        if 'no_fault' in s.scenario_type:
+            normal_fname = normal_file_map.get(s.root_cause_system, "")
+            if normal_fname:
+                # Override source_file to use fault-free data
+                object.__setattr__(s, 'source_file', normal_fname)
+                logger.debug(f"  no_fault {s.scenario_id}: using {normal_fname}")
+
     # Group sampled scenarios by (system_id, source_file) to avoid duplicate loads
     needed_files = {}  # (sys_id, filename) → list of scenario_ids
     for s in sampled:
@@ -131,7 +154,8 @@ def main():
     for s in sampled:
         for sys_id in s.affected_systems:
             if sys_id != s.root_cause_system:
-                key = (sys_id, "")  # need normal data from downstream
+                normal_fname = normal_file_map.get(sys_id, "")
+                key = (sys_id, normal_fname)  # downstream systems use clean baseline
                 needed_files.setdefault(key, [])
 
     # Build file path lookup by system
@@ -170,7 +194,7 @@ def main():
             # Downstream system data (use default/first file)
             for sys_id in s.affected_systems:
                 if sys_id != s.root_cause_system and sys_id not in system_data:
-                    alt_key = (sys_id, "")
+                    alt_key = (sys_id, normal_file_map.get(sys_id, ""))
                     if alt_key in loaded_data:
                         system_data[sys_id] = loaded_data[alt_key]
 

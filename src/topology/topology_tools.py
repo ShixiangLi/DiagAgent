@@ -145,12 +145,15 @@ class TopologyToolExecutor:
     graph queries, returning structured results.
     """
 
-    def __init__(self, topology_builder):
+    def __init__(self, topology_builder, health_provider=None):
         """
         Args:
             topology_builder: An initialized TopologyBuilder with a built graph.
+            health_provider: Optional PredictionToolExecutor that provides
+                system-level anomaly scores via get_system_health().
         """
         self.tb = topology_builder
+        self._health_provider = health_provider
         self._tool_map = {
             "get_system_overview": self._get_system_overview,
             "get_node_children": self._get_node_children,
@@ -186,13 +189,25 @@ class TopologyToolExecutor:
         systems = self.tb.get_systems()
         result = []
         for sys in systems:
-            result.append({
+            sys_info = {
                 "system_id": sys.get("system_id", ""),
                 "name": sys.get("name", ""),
                 "type": sys.get("system_type", ""),
                 "description": sys.get("description", ""),
                 "node_id": sys.get("node_id", ""),
-            })
+            }
+            # Inject Oracle-computed system health when available
+            if self._health_provider is not None:
+                try:
+                    health = self._health_provider.get_system_health(
+                        sys.get("system_id", "")
+                    )
+                    sys_info["anomaly_score"] = health.get("anomaly_score", 0.0)
+                    sys_info["health_status"] = health.get("status", "unknown")
+                except Exception:
+                    sys_info["anomaly_score"] = 0.0
+                    sys_info["health_status"] = "unknown"
+            result.append(sys_info)
         return {"status": "success", "systems": result, "count": len(result)}
 
     def _get_node_children(self, args: Dict) -> Dict:

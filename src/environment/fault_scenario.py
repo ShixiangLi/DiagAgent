@@ -142,6 +142,12 @@ def create_scenario_state(
                     except (TypeError, ValueError):
                         pass
             if readings:
+                # Physical constraint: wet-bulb ≤ dry-bulb temperature
+                if "OA_TEMP" in readings and "OA_TEMP_WB" in readings:
+                    db = readings["OA_TEMP"]
+                    wb = readings["OA_TEMP_WB"]
+                    if wb > db:
+                        readings["OA_TEMP_WB"] = round(db - 3.0, 4)
                 sensor_readings[nid] = readings
 
         # Pre-compute Oracle features for the system
@@ -515,8 +521,33 @@ def _infer_root_cause_node(
     """Infer the root cause node based on fault type keywords."""
     fault_lower = fault_type.lower()
 
-    # Keyword-to-component mapping
+    # Keyword-to-component mapping (order matters: more specific first)
     keyword_map = {
+        "sensorbias_rmtemp": ["Room", "Test_Room"],
+        "sensorbias_vavairflow": [
+            "Parallel_FPU", "Series_FPU", "Mixing_Box_VAV", "fcu_zone",
+        ],
+        "sensorbias_hsa": ["Hot_Deck"],
+        "sensorbias_hsp": ["Hot_Deck"],
+        "sensorbias_csa": ["Cold_Deck"],
+        "sensorbias_csp": ["Cold_Deck"],
+        "vlvstuck_cooling": ["Cooling_Coil", "fcu_zone"],
+        "vlvleak_cooling": ["Cooling_Coil", "fcu_zone"],
+        "vlvstuck_heating": ["Heating_Coil", "Reheating_Coil", "fcu_zone"],
+        "vlvleak_heating": ["Heating_Coil", "Reheating_Coil", "fcu_zone"],
+        "fouling_cooling": ["Cooling_Coil", "fcu_zone"],
+        "fouling_heating": ["Heating_Coil", "Reheating_Coil", "fcu_zone"],
+        "filterrestriction": ["fcu_zone", "Filter"],
+        "oablockage": ["Outdoor_Air_Damper", "fcu_zone"],
+        "oadmpr": ["Outdoor_Air_Damper", "fcu_zone"],
+        "fanoutletblockage": ["Supply_Air_Fan", "fcu_zone"],
+        "vavdmpr": ["Discharge_Air_Damper", "Mixing_Box_VAV"],
+        "dmprstuck_oa": ["Outdoor_Air_Damper"],
+        "dmprstuck_cold": ["Cold_Deck"],
+        "dmprstuck_hot": ["Hot_Deck"],
+        "dmpr": ["Damper", "Outdoor_Air_Damper"],
+        "reheatcoil": ["Reheating_Coil", "Heating_Coil"],
+        "reheatvlv":  ["Reheating_Coil", "Heating_Coil"],
         "chiller": ["Chiller", "CHL"],
         "coolingtower": ["Cooling_Tower", "CT"],
         "cooling_tower": ["Cooling_Tower", "CT"],
@@ -538,10 +569,17 @@ def _infer_root_cause_node(
 
     for keyword, comp_names in keyword_map.items():
         if keyword in fault_lower:
-            for comp in components:
-                comp_name = comp.get("name", "")
-                if any(cn in comp_name for cn in comp_names):
-                    return comp["node_id"]
+            # Priority: exact name match first, then substring match
+            for cn in comp_names:
+                for comp in components:
+                    comp_name = comp.get("name", "")
+                    if comp_name == cn:
+                        return comp["node_id"]
+            for cn in comp_names:
+                for comp in components:
+                    comp_name = comp.get("name", "")
+                    if cn in comp_name:
+                        return comp["node_id"]
 
     # Default: return first component with sensors
     for comp in components:

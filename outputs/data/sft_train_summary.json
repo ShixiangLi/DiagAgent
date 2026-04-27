@@ -2,12 +2,14 @@
   "total_examples": 3000,
   "format": "sharegpt",
   "scenario_type_counts": {
-    "single_system": 1200,
-    "cross_system": 750,
-    "no_fault": 300,
-    "low_confidence": 450,
-    "ambiguous": 300
+    "na_low_confidence": 120,
+    "a_single_system": 630,
+    "a_cross_system": 510,
+    "na_cross_system": 510,
+    "na_single_system": 750,
+    "na_no_fault": 210,
+    "a_low_confidence": 270
   },
-  "avg_turns": 17.07,
-  "avg_tool_calls": 7.535
+  "avg_turns": 15.243333333333334,
+  "avg_tool_calls": 6.621666666666667
 }

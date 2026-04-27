@@ -15,6 +15,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from src.environment.scenario_matching import match_scenario
 from src.training.reward_functions import compute_total_reward
 from src.utils.io_utils import load_yaml, save_json, ensure_dir, setup_logger
 
@@ -51,15 +52,19 @@ DEFAULT_RL_CONFIG = {
     # Evaluation
     "eval_steps": 50,
     "diag_eval_episodes": 30,
+    "diag_eval_sampling": "stratified",
+    "diag_eval_seed": 42,
     "save_steps": 50,
 
     # Reward weights
     "reward_weights": {
-        "accuracy": 0.35,
-        "efficiency": 0.20,
-        "format": 0.15,
-        "reasoning": 0.15,
-        "completeness": 0.15,
+        "accuracy": 0.65,
+        "efficiency": 0.08,
+        "format": 0.04,
+        "reasoning": 0.04,
+        "completeness": 0.05,
+        "topology": 0.06,
+        "consistency": 0.08,
     },
 
     # Data
@@ -228,7 +233,8 @@ def _compute_trajectory_log_prob(
     ).to(model.device)
 
     # Truncate to avoid OOM on very long multi-turn conversations
-    max_len = 2048
+    # Use 8192 (not 2048) to retain diagnosis tokens at the end
+    max_len = 8192
     if full_ids.shape[1] > max_len:
         full_ids = full_ids[:, -max_len:]
 
@@ -276,7 +282,8 @@ def _compute_kl_divergence(
     full_ids = tokenizer.encode(full_text, return_tensors="pt").to(model.device)
 
     # Truncate to avoid OOM on very long sequences
-    max_len = 2048
+    # Use 8192 (not 2048) to retain diagnosis tokens
+    max_len = 8192
     if full_ids.shape[1] > max_len:
         full_ids = full_ids[:, -max_len:]
 
@@ -380,8 +387,10 @@ def run_rl_training(config: Dict[str, Any]) -> str:
 
     # ---- Build scenario state loader ----
     import pandas as pd
+    from dataclasses import replace
     from src.environment.fault_scenario import FaultScenario, create_scenario_state
     from src.environment.diagnostic_path import DiagnosticPath, PathNode
+    from src.environment.diagnostic_path import generate_no_fault_path
     from src.node_models.data_loader import discover_fault_files
 
     scenario_lookup = {}
@@ -405,33 +414,93 @@ def run_rl_training(config: Dict[str, Any]) -> str:
     import yaml
     topo_config = yaml.safe_load(open("configs/topology_config.yaml", "r"))
     file_path_map = {}  # (sys_id, filename) -> filepath
+    normal_file_map = {}  # sys_id -> baseline filename
     for sys_id in topo_config.get("systems", {}):
         try:
             for ff in discover_fault_files("data/lbnl", sys_id):
                 file_path_map[(sys_id, ff.filename)] = ff.filepath
+                if ff.is_fault_free or ff.fault_type.lower() == "normal":
+                    normal_file_map.setdefault(sys_id, ff.filename)
         except Exception:
             pass
 
     csv_cache = {}  # (sys_id, filename) -> DataFrame
 
-    def _load_rl_scenario_state(scenario_id: str):
-        """Load scenario state for an RL prompt."""
-        fs = scenario_lookup.get(scenario_id)
+    def _load_rl_scenario_state(scenario_id: str, ground_truth=None, scenario_type: str = ""):
+        """Load scenario state for an RL prompt, including downstream data.
+
+        Uses the same 3-strategy matching as the evaluator to prevent
+        ID mismatch issues:
+          1. Direct ID match
+          2. Strip SFT prefixes/suffixes
+          3. Match by ground_truth (root_cause_system + fault_type)
+        """
+        fs, _, _ = match_scenario(
+            scenario_id,
+            scenario_lookup,
+            ground_truth=ground_truth,
+            scenario_type=scenario_type,
+        )
+
         if fs is None:
             return None
+
+        gt_fault = str((ground_truth or {}).get("fault_type", "")).lower()
+        gt_node = str((ground_truth or {}).get("root_cause_node", "")).lower()
+        is_no_fault = (
+            "no_fault" in getattr(fs, "scenario_type", "")
+            or gt_fault in ("normal", "no_fault", "none")
+            or gt_node in ("none", "")
+        )
+        if is_no_fault:
+            normal_file = normal_file_map.get(fs.root_cause_system)
+            if normal_file:
+                window_size = max(1, fs.time_window_end - fs.time_window_start)
+                if window_size <= 1:
+                    window_size = 15
+                fs = replace(
+                    fs,
+                    root_cause_node="none",
+                    fault_type="Normal",
+                    fault_intensity="none",
+                    affected_systems=[fs.root_cause_system],
+                    source_file=normal_file,
+                    time_window_end=fs.time_window_start + window_size,
+                    diagnostic_path=generate_no_fault_path(
+                        fs.root_cause_system, builder,
+                    ),
+                )
+
+        # Build system_data with primary and downstream system data
+        system_data = {}
+        # Primary system
         key = (fs.root_cause_system, fs.source_file)
         if key not in csv_cache:
             fpath = file_path_map.get(key)
             if fpath and os.path.exists(fpath):
                 df = pd.read_csv(fpath, nrows=50000, low_memory=False)
                 csv_cache[key] = df.select_dtypes(include=["number"])
-            else:
-                return None
-        if key not in csv_cache:
+        if key in csv_cache:
+            system_data[fs.root_cause_system] = csv_cache[key]
+        else:
             return None
+        # Downstream systems (for cross-system scenarios)
+        for sys_id in fs.affected_systems:
+            if sys_id != fs.root_cause_system and sys_id not in system_data:
+                normal_file = normal_file_map.get(sys_id)
+                if not normal_file:
+                    continue
+                alt_key = (sys_id, normal_file)
+                if alt_key not in csv_cache:
+                    fpath = file_path_map.get(alt_key)
+                    if fpath and os.path.exists(fpath):
+                        df = pd.read_csv(fpath, nrows=50000, low_memory=False)
+                        csv_cache[alt_key] = df.select_dtypes(include=["number"])
+                if alt_key in csv_cache:
+                    system_data[sys_id] = csv_cache[alt_key]
         try:
             return create_scenario_state(
-                fs, {fs.root_cause_system: csv_cache[key]},
+                fs, system_data,
                 builder, registry=model_registry,
             )
         except Exception:
@@ -444,6 +513,71 @@ def run_rl_training(config: Dict[str, Any]) -> str:
             if line.strip():
                 train_prompts.append(json.loads(line))
     logger.info(f"Loaded {len(train_prompts)} RL training prompts")
+
+    # ---- Build per-type index for curriculum learning ----
+    prompts_by_type = {}
+    for entry in train_prompts:
+        stype = entry.get("metadata", {}).get("scenario_type", "single_system")
+        prompts_by_type.setdefault(stype, []).append(entry)
+
+    # v6: Cap no_fault scenarios to prevent reward hacking shortcut
+    # Without this, 34% of Phase 1 pool is no_fault → model learns "just say no_fault"
+    no_fault_cap = config.get("no_fault_cap", 100)
+    no_fault_types = ["na_no_fault", "no_fault"]
+    for nf_type in no_fault_types:
+        if nf_type in prompts_by_type and len(prompts_by_type[nf_type]) > no_fault_cap:
+            original_count = len(prompts_by_type[nf_type])
+            import random as _rnd
+            _rnd.shuffle(prompts_by_type[nf_type])
+            prompts_by_type[nf_type] = prompts_by_type[nf_type][:no_fault_cap]
+            logger.info(f"  Capped {nf_type}: {original_count} → {no_fault_cap}")
+
+    phase3_prompts = [
+        prompt
+        for entries in prompts_by_type.values()
+        for prompt in entries
+    ]
+
+    logger.info("Scenario type distribution: " + ", ".join(
+        f"{t}={len(v)}" for t, v in sorted(prompts_by_type.items())
+    ))
+
+    # Curriculum learning configuration
+    curriculum = config.get("curriculum", {})
+    phase1_end = curriculum.get("phase1_end", 100)
+    phase2_end = curriculum.get("phase2_end", 200)
+    # Default types use na_/a_ prefixed names matching actual data
+    phase1_types = set(curriculum.get("phase1_types",
+        ["na_single_system", "a_single_system", "na_no_fault"]))
+    phase2_types = set(curriculum.get("phase2_types",
+        ["na_single_system", "a_single_system", "na_no_fault",
+         "a_low_confidence", "na_low_confidence"]))
+
+    def _get_curriculum_pool(step):
+        """Return the training prompt pool for the current curriculum phase."""
+        if step <= phase1_end:
+            pool = []
+            for t in phase1_types:
+                pool.extend(prompts_by_type.get(t, []))
+            phase_name = "Phase 1 (easy)"
+        elif step <= phase2_end:
+            pool = []
+            for t in phase2_types:
+                pool.extend(prompts_by_type.get(t, []))
+            phase_name = "Phase 2 (medium)"
+        else:
+            pool = phase3_prompts
+            phase_name = "Phase 3 (capped all)"
+        # Fallback: if pool is empty (type mismatch), use all prompts
+        if not pool:
+            pool = train_prompts
+            phase_name += " (fallback: all)"
+        return pool, phase_name
+
+    # Early stopping configuration
+    early_stop_da_thresh = config.get("early_stop_da_threshold", 0.5)
+    early_stop_patience = config.get("early_stop_patience", 2)
+    da_decline_count = 0
 
     # ---- Prepare eval test data ----
     eval_test_path = os.path.join(output_dir, "rl_eval_test.jsonl")
@@ -501,10 +635,12 @@ def run_rl_training(config: Dict[str, Any]) -> str:
 
     episodes_dir = ensure_dir(os.path.join(output_dir, "rl_episodes"))
 
-    logger.info("Starting GRPO training with multi-turn Oracle rollouts...")
+    logger.info("Starting GRPO training with curriculum learning...")
     logger.info(f"  batch_size={batch_size}, group_size={group_size}, "
                 f"accum_steps={accum_steps}")
     logger.info(f"  total_steps={total_steps}, kl_coeff={kl_coeff}")
+    logger.info(f"  curriculum: phase1(easy)≤{phase1_end}, "
+                f"phase2(medium)≤{phase2_end}, phase3(all)>{phase2_end}")
     start_time = time.time()
 
     model.train()
@@ -516,8 +652,11 @@ def run_rl_training(config: Dict[str, Any]) -> str:
     #   ON during loss computation (backward pass needs memory saving)
 
     for step in range(1, total_steps + 1):
-        # ---- Sample a batch of prompts ----
-        batch = rng.sample(train_prompts, min(batch_size, len(train_prompts)))
+        # ---- Sample from curriculum-appropriate pool ----
+        pool, phase_name = _get_curriculum_pool(step)
+        if step in (1, phase1_end + 1, phase2_end + 1):
+            logger.info(f"  Curriculum: entering {phase_name} ({len(pool)} prompts available)")
+        batch = rng.sample(pool, min(batch_size, len(pool)))
 
         step_rewards = []
         step_loss = torch.tensor(0.0, device=model.device, requires_grad=False)
@@ -532,8 +671,12 @@ def run_rl_training(config: Dict[str, Any]) -> str:
 
             # Load scenario state for Oracle predictions
             sid = prompt_entry.get("id", prompt_entry.get("metadata", {}).get("scenario_id", ""))
-            state = _load_rl_scenario_state(sid)
-            if state is not None:
+            state = _load_rl_scenario_state(
+                sid,
+                ground_truth=ground_truth,
+                scenario_type=prompt_entry.get("metadata", {}).get("scenario_type", ""),
+            )
+            if tool_executor is not None:
                 tool_executor.set_scenario_state(state)
 
             for g in range(group_size):
@@ -553,7 +696,7 @@ def run_rl_training(config: Dict[str, Any]) -> str:
 
                 model.train()  # back to train mode
 
-                # Compute reward
+                # Compute reward (pass tool_results for topology checking)
                 reward_dict = compute_total_reward(
                     agent_outputs=rollout["agent_outputs"],
                     final_diagnosis=rollout["final_diagnosis"],
@@ -561,6 +704,7 @@ def run_rl_training(config: Dict[str, Any]) -> str:
                     n_tool_calls=rollout["n_tool_calls"],
                     optimal_path_length=ground_truth.get("optimal_path_length", 3),
                     weights=reward_weights,
+                    tool_results=rollout.get("tool_results"),
                 )
 
                 group_rollouts.append(rollout)
@@ -576,13 +720,21 @@ def run_rl_training(config: Dict[str, Any]) -> str:
                     f"diag={diag_str}"
                 )
 
-            # ---- Compute group-relative advantages ----
-            mean_reward = sum(group_rewards_raw) / len(group_rewards_raw)
-            std_reward = max(
-                (sum((r - mean_reward) ** 2 for r in group_rewards_raw) / len(group_rewards_raw)) ** 0.5,
-                1e-8,
-            )
-            advantages = [(r - mean_reward) / std_reward for r in group_rewards_raw]
+            # ---- Compute leave-one-out advantages ----
+            # Unlike standard GRPO (mean/std normalization which skips zero-variance
+            # groups), leave-one-out always produces gradient signal:
+            #   advantage_i = reward_i - mean(rewards_{j≠i})
+            # This fixes the 29% zero-loss problem from v4.
+            n_rollouts = len(group_rewards_raw)
+            advantages = []
+            for i in range(n_rollouts):
+                others = [r for j, r in enumerate(group_rewards_raw) if j != i]
+                baseline = sum(others) / max(len(others), 1)
+                advantages.append(group_rewards_raw[i] - baseline)
+
+            # Clip advantages to prevent extreme updates
+            max_adv = 2.0
+            advantages = [max(-max_adv, min(max_adv, a)) for a in advantages]
 
             # ---- Compute policy gradient loss (WITH gradient) ----
             # Enable gradient checkpointing for memory-efficient forward passes
@@ -615,7 +767,8 @@ def run_rl_training(config: Dict[str, Any]) -> str:
 
         # ---- Backward pass ----
         effective_loss = step_loss / (batch_size * group_size)
-        effective_loss.backward()
+        if effective_loss.requires_grad:
+            effective_loss.backward()
         model.gradient_checkpointing_disable()  # disable for next rollout phase
 
         if step % accum_steps == 0:
@@ -663,6 +816,8 @@ def run_rl_training(config: Dict[str, Any]) -> str:
                     max_steps=max_rollout_steps,
                     output_dir=episodes_dir,
                     step=step,
+                    sampling_strategy=config.get("diag_eval_sampling", "stratified"),
+                    sampling_seed=config.get("diag_eval_seed", 42),
                 )
 
                 metrics = eval_result.get("overall", {})
@@ -693,6 +848,24 @@ def run_rl_training(config: Dict[str, Any]) -> str:
                 logger.warning(
                     f"RL eval failed at step {step}: {type(e).__name__}: {e}"
                 )
+
+            # ---- Early stopping check ----
+            if len(diag_eval_history) >= 2:
+                latest_da = diag_eval_history[-1].get("diagnostic_accuracy", 0)
+                if latest_da < early_stop_da_thresh:
+                    da_decline_count += 1
+                    logger.warning(
+                        f"  DA below threshold ({latest_da:.1%} < {early_stop_da_thresh:.1%}), "
+                        f"decline count: {da_decline_count}/{early_stop_patience}"
+                    )
+                    if da_decline_count >= early_stop_patience:
+                        logger.warning(
+                            f"  EARLY STOPPING at step {step}: DA below {early_stop_da_thresh:.1%} "
+                            f"for {early_stop_patience} consecutive evals."
+                        )
+                        break
+                else:
+                    da_decline_count = 0  # Reset counter on improvement
 
         # ---- Save periodic checkpoint ----
         if step % config["save_steps"] == 0:

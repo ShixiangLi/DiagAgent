@@ -1,38 +1,71 @@
-# RL (GRPO) Training Configuration
+# RL (GRPO) Training Configuration — v6 (No-fault hacking fix)
+# Key changes from v5:
+#   1. Remove no_fault from Phase 1 — prevent shortcut learning
+#   2. Accuracy weight 0.45→0.70 — make correctness dominate
+#   3. Cap na_no_fault to 100 via data preprocessing
+#   4. False no_fault penalty in reward function
+
 model_name_or_path: "outputs/sft/best"
 ref_model_name: "outputs/sft/best"
 output_dir: "outputs/rl"
 
 # GRPO parameters
-group_size: 4
+group_size: 8
 kl_coeff: 0.05
 clip_range: 0.2
 max_rollout_steps: 15
-temperature: 0.8
+temperature: 0.9
 
-# Training (optimized for RTX PRO 6000 96GB)
-# Memory optimization: shared base model + adapter toggling saves ~14GB
-num_train_steps: 500
-per_device_batch_size: 1       # 1 prompt × 4 groups × multi-turn = high memory
+# Training
+num_train_steps: 300
+per_device_batch_size: 1
 gradient_accumulation_steps: 4
-learning_rate: 5.0e-6
+learning_rate: 2.0e-6
 lr_scheduler_type: cosine
-warmup_ratio: 0.05
+warmup_ratio: 0.1
 bf16: true
-max_new_tokens: 512            # Reduced from 1024 (each turn < 200 tokens)
+max_new_tokens: 768
 
 # Evaluation
 eval_steps: 50
 diag_eval_episodes: 30
+diag_eval_sampling: "stratified"
+diag_eval_seed: 42
 save_steps: 50
 
-# Reward weights
+# Curriculum learning phases
+# CRITICAL: no_fault REMOVED from Phase 1 & 2 to prevent shortcut learning.
+# Model must first learn real diagnosis before seeing no-fault scenarios.
+curriculum:
+  phase1_end: 100
+  phase2_end: 200
+  phase1_types:
+    - "a_single_system"
+    - "single_system"
+  phase2_types:
+    - "a_single_system"
+    - "single_system"
+    - "a_low_confidence"
+    - "na_low_confidence"
+
+# Reward weights — v7: accuracy-first and efficiency-aware.
+# Efficiency is gated by accuracy in code, so fast wrong answers do not profit.
 reward_weights:
-  accuracy: 0.35
-  efficiency: 0.20
-  format: 0.15
-  reasoning: 0.15
-  completeness: 0.15
+  accuracy: 0.65
+  efficiency: 0.08
+  format: 0.04
+  reasoning: 0.04
+  completeness: 0.05
+  topology: 0.06
+  consistency: 0.08
+
+# No-fault data cap: max number of na_no_fault prompts in training pool
+# Prevents no_fault from being a statistically profitable shortcut
+no_fault_cap: 100
+
+# Early stopping
+early_stop_da_threshold: 0.3
+early_stop_patience: 4
 
 # Data
 train_data_path: "outputs/data/rl_train.jsonl"

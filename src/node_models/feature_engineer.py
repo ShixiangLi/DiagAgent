@@ -47,7 +47,7 @@ def compute_window_features(
 
     # Parse timestamp if available (for temporal features)
     time_col = df.columns[0]
-    timestamps = pd.to_datetime(df[time_col], errors="coerce")
+    timestamps = pd.to_datetime(df[time_col], format="mixed", errors="coerce")
 
     features_list = []
     n_rows = len(sensor_data)

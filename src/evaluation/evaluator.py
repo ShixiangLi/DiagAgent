@@ -13,9 +13,111 @@ import time
 from typing import Any, Dict, List, Optional
 
 from src.evaluation.metrics import compute_all_metrics
+from src.environment.scenario_matching import match_scenario
 from src.utils.io_utils import save_json, ensure_dir, setup_logger
 
 logger = setup_logger(__name__)
+
+
+# ============================================================================
+# Scenario Sampling
+# ============================================================================
+
+def _load_jsonl(path: str) -> List[Dict[str, Any]]:
+    """Load a JSONL file into memory."""
+    rows: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def _scenario_type(row: Dict[str, Any]) -> str:
+    """Return the scenario type used for stratified evaluation."""
+    return row.get("metadata", {}).get("scenario_type", "unknown")
+
+
+def stratified_sample_scenarios(
+    scenarios: List[Dict[str, Any]],
+    max_episodes: int,
+    seed: int = 42,
+    strategy: str = "stratified",
+) -> List[Dict[str, Any]]:
+    """
+    Sample evaluation scenarios while preserving scenario-type proportions.
+
+    This is intended for in-training eval steps: it keeps the episode count
+    small, but avoids a biased first-N slice of the eval file.  When
+    ``max_episodes`` covers the whole set, the original set is returned.
+    """
+    if max_episodes <= 0 or len(scenarios) <= max_episodes:
+        return list(scenarios)
+    if strategy != "stratified":
+        import random
+        rng = random.Random(seed)
+        sampled = list(scenarios)
+        rng.shuffle(sampled)
+        return sampled[:max_episodes]
+
+    import random
+    from collections import defaultdict
+
+    rng = random.Random(seed)
+    by_type: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for scenario in scenarios:
+        by_type[_scenario_type(scenario)].append(scenario)
+
+    for entries in by_type.values():
+        rng.shuffle(entries)
+
+    total = len(scenarios)
+    types = sorted(by_type)
+    target = {
+        stype: max_episodes * len(by_type[stype]) / total
+        for stype in types
+    }
+    allocation = {stype: 0 for stype in types}
+
+    # If possible, include every type at least once.
+    if max_episodes >= len(types):
+        for stype in types:
+            allocation[stype] = 1
+
+    while sum(allocation.values()) < max_episodes:
+        candidates = [
+            stype for stype in types
+            if allocation[stype] < len(by_type[stype])
+        ]
+        if not candidates:
+            break
+        stype = max(
+            candidates,
+            key=lambda t: (target[t] - allocation[t], len(by_type[t]), t),
+        )
+        allocation[stype] += 1
+
+    sampled: List[Dict[str, Any]] = []
+    for stype in types:
+        sampled.extend(by_type[stype][:allocation[stype]])
+    rng.shuffle(sampled)
+    return sampled
+
+
+def _log_eval_sample_distribution(
+    scenarios: List[Dict[str, Any]],
+    total_available: int,
+    strategy: str,
+) -> None:
+    """Log the scenario distribution selected for an evaluation step."""
+    from collections import Counter
+
+    counts = Counter(_scenario_type(s) for s in scenarios)
+    logger.info(
+        f"  Evaluation sample: {len(scenarios)}/{total_available} episodes "
+        f"({strategy}) - "
+        + ", ".join(f"{t}={n}" for t, n in sorted(counts.items()))
+    )
 
 
 # ============================================================================
@@ -188,6 +290,9 @@ def run_model_evaluation(
     output_dir: str,
     max_episodes: int = 200,
     max_steps: int = 15,
+    allow_mock: bool = False,
+    sampling_strategy: str = "stratified",
+    sampling_seed: int = 42,
 ) -> Dict[str, Any]:
     """
     Evaluate a single model on the test set with real Oracle environment.
@@ -219,18 +324,24 @@ def run_model_evaluation(
                 f"nor SFT data ({sft_path}) found"
             )
 
-    # Load test scenarios
-    scenarios = []
-    with open(test_scenarios_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                scenarios.append(json.loads(line))
-
-    scenarios = scenarios[:max_episodes]
-    logger.info(f"  Loaded {len(scenarios)} test scenarios")
+    # Load and sample test scenarios.
+    all_scenarios = _load_jsonl(test_scenarios_path)
+    scenarios = stratified_sample_scenarios(
+        all_scenarios,
+        max_episodes=max_episodes,
+        seed=sampling_seed,
+        strategy=sampling_strategy,
+    )
+    _log_eval_sample_distribution(
+        scenarios,
+        total_available=len(all_scenarios),
+        strategy=sampling_strategy,
+    )
 
     # Create Oracle environment
     builder, tool_executor, model_registry = _create_tool_environment()
+    if tool_executor is None:
+        raise RuntimeError("Oracle environment is unavailable; refusing non-Oracle evaluation")
 
     # Run episodes
     episodes = []
@@ -240,14 +351,17 @@ def run_model_evaluation(
             builder=builder, model_registry=model_registry,
         )
     except ImportError:
-        logger.warning(
-            "GPU/transformers not available. Running with mock evaluation."
-        )
+        if not allow_mock:
+            raise
+        logger.warning("GPU/transformers not available. Running with mock evaluation.")
         episodes = _create_mock_episodes(scenarios, model_name, tool_executor)
     except Exception as e:
+        if not allow_mock:
+            raise RuntimeError(
+                f"Model evaluation failed for {model_name}: {type(e).__name__}: {e}"
+            ) from e
         logger.warning(
-            f"Model loading failed ({type(e).__name__}: {e}). "
-            f"Running with mock evaluation."
+            f"Model loading failed ({type(e).__name__}: {e}). Running with mock evaluation."
         )
         episodes = _create_mock_episodes(scenarios, model_name, tool_executor)
 
@@ -277,6 +391,8 @@ def run_model_evaluation(
         "model_name": model_name,
         "model_path": model_path,
         "n_episodes": len(episodes),
+        "sampling_strategy": sampling_strategy,
+        "sampling_seed": sampling_seed,
         "overall_metrics": metrics,
         "metrics_by_scenario_type": type_metrics,
         "metrics_by_difficulty": diff_metrics,
@@ -363,11 +479,14 @@ def _run_episodes_with_model(
     # Build scenario state loader if topology available
     _scenario_lookup = {}
     _file_path_map = {}
+    _normal_file_map = {}
     _csv_cache = {}
     if builder is not None:
         import pandas as pd
+        from dataclasses import replace
         from src.environment.fault_scenario import FaultScenario, create_scenario_state
         from src.environment.diagnostic_path import DiagnosticPath, PathNode
+        from src.environment.diagnostic_path import generate_no_fault_path
         from src.node_models.data_loader import discover_fault_files
 
         all_scenarios_path = "outputs/data/all_scenarios.json"
@@ -392,6 +511,8 @@ def _run_episodes_with_model(
             try:
                 for ff in discover_fault_files("data/lbnl", sys_id):
                     _file_path_map[(sys_id, ff.filename)] = ff.filepath
+                    if ff.is_fault_free or ff.fault_type.lower() == "normal":
+                        _normal_file_map.setdefault(sys_id, ff.filename)
             except Exception:
                 pass
 
@@ -403,8 +524,38 @@ def _run_episodes_with_model(
         # Load scenario state for Oracle predictions
         sid = scenario.get("id", scenario.get("metadata", {}).get("scenario_id", ""))
         if _scenario_lookup and tool_executor is not None:
-            fs = _scenario_lookup.get(sid)
+            fs, _, _ = match_scenario(
+                sid,
+                _scenario_lookup,
+                ground_truth=ground_truth,
+                scenario_type=scenario.get("metadata", {}).get("scenario_type", ""),
+            )
             if fs is not None:
+                gt_fault = str(ground_truth.get("fault_type", "")).lower()
+                gt_node = str(ground_truth.get("root_cause_node", "")).lower()
+                is_no_fault = (
+                    "no_fault" in getattr(fs, "scenario_type", "")
+                    or gt_fault in ("normal", "no_fault", "none")
+                    or gt_node in ("none", "")
+                )
+                if is_no_fault:
+                    normal_file = _normal_file_map.get(fs.root_cause_system)
+                    if normal_file:
+                        window_size = max(1, fs.time_window_end - fs.time_window_start)
+                        if window_size <= 1:
+                            window_size = 15
+                        fs = replace(
+                            fs,
+                            root_cause_node="none",
+                            fault_type="Normal",
+                            fault_intensity="none",
+                            affected_systems=[fs.root_cause_system],
+                            source_file=normal_file,
+                            time_window_end=fs.time_window_start + window_size,
+                            diagnostic_path=generate_no_fault_path(
+                                fs.root_cause_system, builder,
+                            ),
+                        )
                 key = (fs.root_cause_system, fs.source_file)
                 if key not in _csv_cache:
                     fpath = _file_path_map.get(key)
@@ -414,13 +565,33 @@ def _run_episodes_with_model(
                         ).select_dtypes(include=["number"])
                 if key in _csv_cache:
                     try:
+                        system_data = {fs.root_cause_system: _csv_cache[key]}
+                        for sys_id in fs.affected_systems:
+                            if sys_id == fs.root_cause_system or sys_id in system_data:
+                                continue
+                            normal_file = _normal_file_map.get(sys_id)
+                            if not normal_file:
+                                continue
+                            alt_key = (sys_id, normal_file)
+                            if alt_key not in _csv_cache:
+                                fpath = _file_path_map.get(alt_key)
+                                if fpath and os.path.exists(fpath):
+                                    _csv_cache[alt_key] = pd.read_csv(
+                                        fpath, nrows=50000, low_memory=False
+                                    ).select_dtypes(include=["number"])
+                            if alt_key in _csv_cache:
+                                system_data[sys_id] = _csv_cache[alt_key]
                         state = create_scenario_state(
-                            fs, {fs.root_cause_system: _csv_cache[key]},
+                            fs, system_data,
                             builder, registry=model_registry,
                         )
                         tool_executor.set_scenario_state(state)
                     except Exception:
-                        pass
+                        tool_executor.set_scenario_state(None)
+                else:
+                    tool_executor.set_scenario_state(None)
+            else:
+                tool_executor.set_scenario_state(None)
 
         agent_outputs = []
         tool_results = []
@@ -440,9 +611,7 @@ def _run_episodes_with_model(
                 output = model.generate(
                     **inputs,
                     max_new_tokens=512,
-                    temperature=0.1,
-                    do_sample=True,
-                    top_p=0.95,
+                    do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
                 )
 
@@ -530,6 +699,8 @@ def run_diagnostic_eval_with_model(
     max_steps: int = 15,
     output_dir: Optional[str] = None,
     step: int = 0,
+    sampling_strategy: str = "stratified",
+    sampling_seed: int = 42,
 ) -> Dict[str, Any]:
     """
     Run diagnostic evaluation using an already-loaded model and tokenizer.
@@ -551,62 +722,31 @@ def run_diagnostic_eval_with_model(
     """
     import torch
 
-    # Load test scenarios
-    all_scenarios = []
-    with open(test_scenarios_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                all_scenarios.append(json.loads(line))
-
-    # Stratified sampling: ensure every scenario_type is represented
-    import random as _rnd
-    _rng = _rnd.Random(42)
-    by_type = {}
-    for s in all_scenarios:
-        stype = s.get("metadata", {}).get("scenario_type", "unknown")
-        by_type.setdefault(stype, []).append(s)
-
-    scenarios = []
-    if len(all_scenarios) <= max_episodes:
-        scenarios = all_scenarios
-    else:
-        # Allocate at least 1 per type, then distribute remaining proportionally
-        n_types = len(by_type)
-        remaining = max_episodes
-        for stype, entries in sorted(by_type.items()):
-            _rng.shuffle(entries)
-            # At least 1, proportional share of the rest
-            n_alloc = max(1, int(max_episodes * len(entries) / len(all_scenarios)))
-            n_alloc = min(n_alloc, remaining, len(entries))
-            scenarios.extend(entries[:n_alloc])
-            remaining -= n_alloc
-            if remaining <= 0:
-                break
-        # Fill any remaining slots
-        used_ids = {s.get("id") for s in scenarios}
-        for s in all_scenarios:
-            if remaining <= 0:
-                break
-            if s.get("id") not in used_ids:
-                scenarios.append(s)
-                remaining -= 1
-        _rng.shuffle(scenarios)
-
-    type_counts = {}
-    for s in scenarios:
-        t = s.get("metadata", {}).get("scenario_type", "?")
-        type_counts[t] = type_counts.get(t, 0) + 1
-    logger.info(
-        f"  Sampled {len(scenarios)} episodes (stratified): "
-        + ", ".join(f"{t}={n}" for t, n in sorted(type_counts.items()))
+    # Load and sample test scenarios. Add the current step to the seed so
+    # repeated eval steps rotate through the eval pool while preserving type
+    # proportions.
+    all_scenarios = _load_jsonl(test_scenarios_path)
+    scenarios = stratified_sample_scenarios(
+        all_scenarios,
+        max_episodes=max_episodes,
+        seed=sampling_seed + int(step or 0),
+        strategy=sampling_strategy,
+    )
+    _log_eval_sample_distribution(
+        scenarios,
+        total_available=len(all_scenarios),
+        strategy=sampling_strategy,
     )
 
     # Create Oracle environment
     builder, tool_executor, model_registry = _create_tool_environment()
+    if tool_executor is None:
+        raise RuntimeError("Oracle environment is unavailable; refusing non-Oracle diagnostic eval")
 
     # Load original scenarios + sensor data for Oracle predictions
     scenario_lookup = {}  # scenario_id → FaultScenario
     csv_cache = {}        # (system_id, source_file) → DataFrame
+    normal_file_map = {}  # system_id -> baseline filename
     all_scenarios_path = "outputs/data/all_scenarios.json"
     try:
         if os.path.exists(all_scenarios_path):
@@ -651,6 +791,8 @@ def run_diagnostic_eval_with_model(
                     fault_files = discover_fault_files("data/lbnl", sys_id)
                     for ff in fault_files:
                         file_path_map[(sys_id, ff.filename)] = ff.filepath
+                        if ff.is_fault_free or ff.fault_type.lower() == "normal":
+                            normal_file_map.setdefault(sys_id, ff.filename)
                 except Exception:
                     pass
 
@@ -663,34 +805,59 @@ def run_diagnostic_eval_with_model(
         import traceback
         traceback.print_exc()
 
-    def _load_scenario_state(sid):
-        """Load scenario state for a given scenario_id."""
-        # Direct match first
-        fs = scenario_lookup.get(sid)
-        # Fuzzy match for variant scenarios (e.g., "cross_xxx_var720" → "xxx")
-        if fs is None:
-            # Try stripping variant suffixes: _varN, cross_ prefix, ambiguous_ prefix
-            import re
-            base_sid = re.sub(r'_var\d+$', '', sid)
-            # For cross-system: "cross_{sys1}_{sys2}_{N}_varM" → try original base
-            if base_sid.startswith("cross_"):
-                # Extract the original scenario parts
-                parts = base_sid.split("_")
-                # Try matching any scenario that contains the key parts
-                for orig_sid, orig_fs in scenario_lookup.items():
-                    if (orig_fs.root_cause_system in base_sid and
-                        orig_fs.fault_type.lower() in base_sid.lower()):
-                        fs = orig_fs
-                        break
-            # For ambiguous/low_conf: "ambiguous_N" or "low_conf_N"
-            if fs is None:
-                fs = scenario_lookup.get(base_sid)
+    def _load_scenario_state(sid, ground_truth=None, scenario_type: str = ""):
+        """Load scenario state for a given scenario_id.
+
+        Uses multiple matching strategies since SFT IDs differ from
+        original all_scenarios.json IDs:
+          SFT:      a_ddahu_VLVStuck_Cooling_20__default_2_a_single_system_510
+          Original: ddahu_VLVStuck_Cooling_20__default_2
+
+        Strategies (in order):
+          1. Direct ID match
+          2. Strip SFT prefixes (a_, na_lc_, a_lc_, nf_) and suffixes (_stype_N)
+          3. Match by ground_truth (root_cause_system + fault_type)
+        """
+        fs, _, _ = match_scenario(
+            sid,
+            scenario_lookup,
+            ground_truth=ground_truth,
+            scenario_type=scenario_type,
+        )
 
         if fs is None or builder is None:
             return None
         try:
             import pandas as pd
+            from dataclasses import replace
             from src.environment.fault_scenario import create_scenario_state
+            from src.environment.diagnostic_path import generate_no_fault_path
+
+            gt_fault = str((ground_truth or {}).get("fault_type", "")).lower()
+            gt_node = str((ground_truth or {}).get("root_cause_node", "")).lower()
+            is_no_fault = (
+                "no_fault" in getattr(fs, "scenario_type", "")
+                or gt_fault in ("normal", "no_fault", "none")
+                or gt_node in ("none", "")
+            )
+            if is_no_fault:
+                normal_file = normal_file_map.get(fs.root_cause_system)
+                if normal_file:
+                    window_size = max(1, fs.time_window_end - fs.time_window_start)
+                    if window_size <= 1:
+                        window_size = 15
+                    fs = replace(
+                        fs,
+                        root_cause_node="none",
+                        fault_type="Normal",
+                        fault_intensity="none",
+                        affected_systems=[fs.root_cause_system],
+                        source_file=normal_file,
+                        time_window_end=fs.time_window_start + window_size,
+                        diagnostic_path=generate_no_fault_path(
+                            fs.root_cause_system, builder,
+                        ),
+                    )
 
             # Build system_data dict for this scenario
             system_data = {}
@@ -704,6 +871,21 @@ def run_diagnostic_eval_with_model(
                     csv_cache[key] = numeric_df
             if key in csv_cache:
                 system_data[fs.root_cause_system] = csv_cache[key]
+
+            for sys_id in fs.affected_systems:
+                if sys_id == fs.root_cause_system or sys_id in system_data:
+                    continue
+                normal_file = normal_file_map.get(sys_id)
+                if not normal_file:
+                    continue
+                alt_key = (sys_id, normal_file)
+                if alt_key not in csv_cache:
+                    fpath = file_path_map.get(alt_key)
+                    if fpath and os.path.exists(fpath):
+                        df = pd.read_csv(fpath, nrows=50000, low_memory=False)
+                        csv_cache[alt_key] = df.select_dtypes(include=['number'])
+                if alt_key in csv_cache:
+                    system_data[sys_id] = csv_cache[alt_key]
 
             if not system_data:
                 return None
@@ -722,8 +904,9 @@ def run_diagnostic_eval_with_model(
 
         # Set scenario state for Oracle predictions
         sid = scenario.get("id", scenario.get("metadata", {}).get("scenario_id", ""))
-        state = _load_scenario_state(sid)
-        if state is not None and tool_executor is not None:
+        stype = scenario.get("metadata", {}).get("scenario_type", "")
+        state = _load_scenario_state(sid, ground_truth=ground_truth, scenario_type=stype)
+        if tool_executor is not None:
             tool_executor.set_scenario_state(state)
 
         agent_outputs = []
@@ -743,9 +926,7 @@ def run_diagnostic_eval_with_model(
                 output = model.generate(
                     **inputs,
                     max_new_tokens=512,
-                    temperature=0.1,
-                    do_sample=True,
-                    top_p=0.95,
+                    do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
                 )
 
@@ -802,8 +983,9 @@ def run_diagnostic_eval_with_model(
         if final_diag:
             diag_node = str(final_diag.get("root_cause_node", "")).lower()
             diag_fault = str(final_diag.get("fault_type", "")).lower()
-            if gt_fault in ("normal", "none") or gt_node == "none":
-                correct = "none" in diag_fault or "normal" in str(final_diag.get("status", "")).lower()
+            if gt_fault in ("normal", "no_fault", "none") or gt_node in ("none", ""):
+                diag_all = (str(final_diag.get("status", "")) + " " + diag_fault).lower()
+                correct = any(kw in diag_all for kw in ("normal", "no fault", "no_fault", "none"))
             else:
                 node_ok = gt_node in diag_node or diag_node in gt_node
                 fault_ok = gt_fault in diag_fault or diag_fault in gt_fault
@@ -873,6 +1055,8 @@ def run_diagnostic_eval_with_model(
         "overall": metrics,
         "by_type": type_metrics,
         "n_episodes": len(episodes),
+        "sampling_strategy": sampling_strategy,
+        "sampling_seed": sampling_seed + int(step or 0),
     }
 
 

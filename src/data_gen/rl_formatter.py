@@ -31,20 +31,37 @@ def format_rl_prompt(scenario: FaultScenario) -> Dict[str, Any]:
         {"role": "user", "content": scenario.description},
     ]
 
+    # Compute optimal path length from diagnostic path if available
+    if scenario.diagnostic_path is not None:
+        optimal_path_length = scenario.diagnostic_path.path_length
+    elif scenario.optimal_path:
+        optimal_path_length = len([p for p in scenario.optimal_path if p])
+    else:
+        optimal_path_length = 3  # Fallback
+
+    is_no_fault = (
+        "no_fault" in scenario.scenario_type
+        or str(scenario.fault_type).lower() in ("normal", "no_fault")
+        or str(scenario.root_cause_node).lower() in ("none", "")
+    )
+
+    root_cause_node = "none" if is_no_fault else scenario.root_cause_node
+    fault_type = "Normal" if is_no_fault else scenario.fault_type
+    fault_intensity = "none" if is_no_fault else scenario.fault_intensity
+
     return {
         "id": scenario.scenario_id,
         "messages": messages,
         "ground_truth": {
             "root_cause_system": scenario.root_cause_system,
-            "root_cause_node": scenario.root_cause_node,
-            "fault_type": scenario.fault_type,
-            "fault_intensity": scenario.fault_intensity,
+            "root_cause_node": root_cause_node,
+            "fault_type": fault_type,
+            "fault_intensity": fault_intensity,
             "affected_systems": scenario.affected_systems,
-            "optimal_path_length": len([
-                p for p in scenario.optimal_path if p  # non-empty steps
-            ]),
+            "optimal_path_length": optimal_path_length,
         },
         "metadata": {
+            "scenario_id": scenario.scenario_id,
             "scenario_type": scenario.scenario_type,
             "difficulty": scenario.difficulty,
             "source_file": scenario.source_file,

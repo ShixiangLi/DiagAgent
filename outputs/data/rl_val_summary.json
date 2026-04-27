@@ -1,10 +1,13 @@
 {
-  "total_prompts": 468,
+  "total_prompts": 657,
   "scenario_type_counts": {
-    "low_confidence": 200,
-    "ambiguous": 123,
+    "a_single_system": 123,
+    "a_low_confidence": 123,
+    "na_low_confidence": 123,
+    "na_no_fault": 123,
     "single_system": 123,
     "no_fault": 2,
-    "cross_system": 20
+    "cross_system": 20,
+    "a_cross_system": 20
   }
 }
