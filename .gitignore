@@ -38,28 +38,18 @@ Thumbs.db
 desktop.ini
 
 # ==================================
-# Model Outputs (large files)
+# Generated artifacts & datasets
+# Keep the directory STRUCTURE (via .gitkeep) but never upload actual files
+# (trained models, generated data, checkpoints, raw dataset, parquet cache).
+# They are large and fully reproducible from the scripts.
 # ==================================
-outputs/models/
-outputs/sft/
-outputs/rl/
-outputs/evaluation/
-outputs/topology/
-outputs/cache/
-
-# ==================================
-# Generated Data (reproducible)
-# ==================================
-outputs/data/sft_train.jsonl
-outputs/data/sft_val.jsonl
-outputs/data/rl_train.jsonl
-outputs/data/rl_val.jsonl
-outputs/data/all_scenarios.json
-
-# ==================================
-# Raw Dataset (download separately)
-# ==================================
-data/lbnl/
+data/**
+outputs/**
+outputs/models_pre_calibration/
+# Re-include directories and placeholder files so the empty tree is tracked
+!data/**/
+!outputs/**/
+!**/.gitkeep
 
 # ==================================
 # Logs & Temp
