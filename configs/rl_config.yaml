@@ -1,9 +1,11 @@
-# RL (GRPO) Training Configuration — v6 (No-fault hacking fix)
-# Key changes from v5:
-#   1. Remove no_fault from Phase 1 — prevent shortcut learning
-#   2. Accuracy weight 0.45→0.70 — make correctness dominate
-#   3. Cap na_no_fault to 100 via data preprocessing
-#   4. False no_fault penalty in reward function
+# RL (GRPO) Training Configuration - stable SFT-anchored RL
+# Key safeguards:
+#   1. Keep a small no-fault replay stream in Phase 1/2 to prevent forgetting.
+#   2. Keep scenario variants from the same fault/source CSV in one split.
+#   3. Cap na_no_fault/no_fault in the effective training pool.
+#   4. Use real Oracle mode during RL, not diagnostic_path teacher routing.
+#   5. Hide get_system_overview anomaly scores during RL training/eval.
+#   6. Anchor KL to the SFT adapter, not to base Qwen.
 
 model_name_or_path: "outputs/sft/best"
 ref_model_name: "outputs/sft/best"
@@ -13,54 +15,178 @@ output_dir: "outputs/rl"
 group_size: 8
 kl_coeff: 0.05
 clip_range: 0.2
+# Hard/evaluation cap. Training uses the phase-specific caps below.
 max_rollout_steps: 15
-temperature: 0.9
+train_rollout_steps:
+  phase1: 12
+  phase2: 12
+  phase3: 15
+temperature: 0.75
+rollout_do_sample: true
+rollout_top_p: 0.9
+# Keep Qwen2.5-7B on one visible GPU for multi-turn agent rollouts.
+# device_map=auto shards across GPUs and made short tool-call generation slow
+# enough to hit timeouts on the 4,5,6,7 server.
+model_device_map: "single"
 
 # Training
-num_train_steps: 300
+num_train_steps: 250
 per_device_batch_size: 1
 gradient_accumulation_steps: 4
-learning_rate: 2.0e-6
+learning_rate: 8.0e-7
 lr_scheduler_type: cosine
-warmup_ratio: 0.1
+warmup_ratio: 0.06
 bf16: true
-max_new_tokens: 768
+max_new_tokens: 512
+# Flash-Attention-2 for long multi-turn rollout contexts (auto-falls back to
+# default attention if flash-attn is unavailable/incompatible).
+attn_implementation: "flash_attention_2"
+stop_on_tool_tags: true
+rollout_generate_timeout_seconds: 90
+rollout_max_input_tokens: null
+log_rollout_stages: false
+save_train_rollouts: true
+rollout_warmup_new_tokens: 8
+clear_cuda_cache_each_step: true
+gradient_checkpointing_for_loss: true
+backward_per_trajectory: true
+max_loss_context_tokens: 6144
+max_kl_context_tokens: 2048
+log_prob_mode: "per_turn"
+refresh_system_prompt_for_training: true
+
+# EPO step-level optimization (eq:epo_reward + eq:epo_pg_loss).
+# Per-step evidence-potential reward with step-level group+leave-one-out
+# advantages, replacing the trajectory-scalar GRPO advantage.
+use_step_level_epo: true
+epo_discount: 0.95
 
 # Evaluation
-eval_steps: 50
-diag_eval_episodes: 30
-diag_eval_sampling: "stratified"
+# Per-step checkpoint-selection eval is intentionally small (runs every
+# eval_steps). Authoritative metrics with adequate cross-system sample size
+# come from: python scripts/07_evaluate.py --models rl --test-size 200
+eval_steps: 25
+run_diagnostic_eval: true
+diag_eval_profile: "balanced_monitor"
+diag_eval_episodes: 36
+diag_eval_csv_nrows: 10000
+diag_eval_episode_timeout_seconds: 180
+diag_eval_max_steps: 15
+diag_eval_max_new_tokens: 512
+diag_eval_generate_timeout_seconds: 120
+diag_eval_sampling: "per_type"
+diag_eval_samples_per_type: 4
+diag_eval_scenario_types:
+  - "a_single_system"
+  - "single_system"
+  - "a_cross_system"
+  - "na_cross_system"
+  - "cross_system"
+  - "a_low_confidence"
+  - "na_low_confidence"
+  - "na_no_fault"
+  - "no_fault"
 diag_eval_seed: 42
-save_steps: 50
+diag_eval_rotate_samples: true
+save_steps: 10
+best_model_metric: "selection_score"
+early_stop_metric: "balanced_diagnostic_accuracy"
+min_cross_best_da: 0.20
+
+# Oracle/tool environment
+oracle_mode: "real"
+include_system_health: false
+expose_status_summary: false
 
 # Curriculum learning phases
-# CRITICAL: no_fault REMOVED from Phase 1 & 2 to prevent shortcut learning.
-# Model must first learn real diagnosis before seeing no-fault scenarios.
+# no_fault is not in the main Phase 1/2 pools, but a capped replay stream is
+# mixed in below. This preserves no-fault behavior without making it a shortcut.
 curriculum:
   phase1_end: 100
   phase2_end: 200
   phase1_types:
     - "a_single_system"
     - "single_system"
+    - "na_low_confidence"
   phase2_types:
     - "a_single_system"
     - "single_system"
+    - "a_cross_system"
+    - "na_cross_system"
+    - "cross_system"
     - "a_low_confidence"
     - "na_low_confidence"
 
-# Reward weights — v7: accuracy-first and efficiency-aware.
-# Efficiency is gated by accuracy in code, so fast wrong answers do not profit.
-reward_weights:
-  accuracy: 0.65
-  efficiency: 0.08
-  format: 0.04
-  reasoning: 0.04
-  completeness: 0.05
-  topology: 0.06
-  consistency: 0.08
+no_fault_replay:
+  types:
+    - "na_no_fault"
+    - "no_fault"
+  phase1_ratio: 0.05
+  phase2_ratio: 0.15
+  phase3_ratio: 0.10
 
-# No-fault data cap: max number of na_no_fault prompts in training pool
-# Prevents no_fault from being a statistically profitable shortcut
+evidence_replay:
+  types:
+    - "a_low_confidence"
+    - "na_low_confidence"
+  phase1_ratio: 0.20
+  phase2_ratio: 0.15
+  phase3_ratio: 0.10
+
+cross_trace_replay:
+  types:
+    - "cross_system"
+    - "na_cross_system"
+    - "a_cross_system"
+  phase1_ratio: 0.12
+  phase2_ratio: 0.25
+  phase3_ratio: 0.20
+
+# Reward weights: accuracy-first and efficiency-aware.
+# Efficiency is gated by accuracy in code, so fast wrong answers do not profit.
+# Sensor verification is uncertainty-gated in code; it is neutral for ordinary
+# high-confidence scenarios unless the policy calls sensors unnecessarily.
+reward_weights:
+  accuracy: 0.10
+  efficiency: 0.01
+  format: 0.02
+  reasoning: 0.02
+  completeness: 0.01
+  topology: 0.01
+  consistency: 0.01
+  evidence: 0.01
+  sensor_verification: 0.01
+  cross_trace: 0.01
+  process: 0.01
+  epo: 0.80
+  epo_config:
+    enabled: true
+    use_state_machine: true
+    use_potential_reward: true
+    # lambda_epo: strength of evidence-potential shaping (sensitivity table).
+    # 0.0 -> Outcome-PPO limit; paper uses 0.75.
+    lambda_epo: 0.75
+    discount: 0.95
+    lambda_chi: 0.45
+    lambda_entropy: 0.20
+    lambda_violation: 0.65
+    tool_cost: 0.025
+    closed_threshold: 0.25
+    open_threshold: 0.10
+    violation_threshold: 0.35
+    recover_threshold: 0.15
+    reliability_threshold: 0.55
+    terminal_correct: 1.0
+    terminal_wrong: 1.0
+    terminal_open: 0.35
+    same_system_projection: 0.18
+    one_hop_projection: 0.55
+    two_hop_projection: 0.30
+    normal_alternative_support: 0.15
+    no_fault_review_threshold: 1.0
+    no_fault_normal_reliability: 0.20
+
+# Effective no-fault data cap per no-fault type in the training pool.
 no_fault_cap: 100
 
 # Early stopping

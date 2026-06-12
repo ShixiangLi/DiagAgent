@@ -1,13 +1,18 @@
 {
-  "total_prompts": 5259,
+  "design_version": "context_preserved_terminal_closure_v2026_06_03",
+  "system_prompt_sha256": "c5dd520a5b0bd8513622a91802e26ff5fd7e8f25022f5c6fac3675b6608b20df",
+  "total_prompts": 4666,
   "scenario_type_counts": {
-    "na_low_confidence": 984,
-    "a_cross_system": 160,
-    "a_single_system": 984,
-    "a_low_confidence": 984,
-    "na_no_fault": 984,
-    "single_system": 984,
-    "cross_system": 160,
-    "no_fault": 19
-  }
+    "na_no_fault": 1050,
+    "a_low_confidence": 980,
+    "cross_system": 347,
+    "na_low_confidence": 980,
+    "single_system": 472,
+    "a_single_system": 472,
+    "a_cross_system": 347,
+    "no_fault": 18
+  },
+  "unique_user_prompts": 4190,
+  "unique_user_prompt_rate": 0.8979854264894985,
+  "leakage_group_count": 202
 }

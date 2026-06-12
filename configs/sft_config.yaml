@@ -19,29 +19,77 @@ target_modules:
 # Training (optimized for RTX PRO 6000 96GB)
 # Longer sequences due to BFS node-discovery steps (~16 turns avg)
 num_epochs: 3
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 32
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 16
 learning_rate: 2.0e-5
 lr_scheduler_type: cosine
-warmup_steps: 100
+# Total SFT is ~255 optimizer steps with the current dataset/batch config.
+# Keep loss eval/checkpoints regular, but run real diagnostic eval at a lower
+# frequency so full SFT does not spend most time in generation callbacks.
+warmup_steps: 30
 max_seq_length: 16384
 weight_decay: 0.01
 bf16: true
 gradient_checkpointing: true
 
+# Optimizations for GPU VRAM and synchronization
+attn_implementation: "flash_attention_2"
+group_by_length: true
+dataloader_num_workers: 4
+
 # Evaluation
 eval_split_ratio: 0.1
-eval_steps: 50
-save_steps: 50
+eval_max_samples: 48
+diag_eval_source_max_samples: null
+eval_steps: 60
+save_steps: 60
 logging_steps: 10
-load_best_model_at_end: true
+load_best_model_at_end: false
 metric_for_best_model: "eval_loss"
-diag_eval_episodes: 64  # Stratified Oracle diagnostic sample per eval step
+run_diagnostic_eval: true
+diagnostic_eval_mode: "trainer_callback"
+diag_eval_profile: "sentinel_debug"
+diag_eval_episodes: 7
 diag_eval_max_steps: 15
-diag_eval_sampling: "stratified"
+diag_eval_max_new_tokens: 256
+diag_eval_episode_timeout_seconds: 90
+diag_eval_generate_timeout_seconds: 30
+run_post_train_eval: true
+post_train_eval_episodes: 160
+post_train_eval_samples_per_type: 20
+post_train_eval_max_new_tokens: 512
+post_train_eval_episode_timeout_seconds: 240
+post_train_eval_generate_timeout_seconds: 90
+diag_eval_sampling: "per_type"
+diag_eval_samples_per_type: 1
+diag_eval_scenario_types:
+  - "a_single_system"
+  - "na_single_system"
+  - "a_cross_system"
+  - "na_cross_system"
+  - "a_low_confidence"
+  - "na_low_confidence"
+  - "na_no_fault"
 diag_eval_seed: 42
-select_best_by_diagnostic: true  # Promote best Oracle diagnostic checkpoint to outputs/sft/best
-diagnostic_best_metric: "aggregate_score"
+diag_eval_oracle_mode: "real"
+diag_eval_include_system_health: false
+diag_eval_expose_status_summary: false
+select_best_by_diagnostic: true
+diagnostic_best_metric: "selection_score"
 
 # Data
 dataset_format: "sharegpt"
+strip_topoitl_labels_for_training: false
+
+# TopoITL three-term weighted supervision (eq:topoitl_loss).
+#   state      = λ_z   (visible diagnosis-state target z_t)
+#   action     = λ_act (structured action ã_t + executable tool_call/diagnosis)
+#   transition = λ_tr  (added to non-initial state blocks, which are also z_{t+1})
+#   base       = weight for <think> rationale tokens
+# All 1.0 recovers uniform-CE behavior cloning. For the "w/o state supervision"
+# ablation set state=0 and transition=0; for "w/o action supervision" lower action.
+topoitl_loss_weights:
+  state: 1.0
+  action: 1.0
+  transition: 0.5
+  base: 0.5

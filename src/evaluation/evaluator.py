@@ -197,12 +197,27 @@ def prepare_test_scenarios(
                     "fault_type": gt.get("fault_type", ""),
                     "fault_intensity": gt.get("fault_intensity", ""),
                     "optimal_path_length": meta.get("path_length", 3),
+                    # Pass through the topology references the TR/ECR metrics
+                    # need; without these the episode falls back to symptom/root
+                    # endpoints and the edge-based TR cannot be computed.
+                    "diagnostic_path_nodes": gt.get("diagnostic_path_nodes", [])
+                    or meta.get("diagnostic_path_nodes", []),
+                    "reference_propagation_edges": gt.get(
+                        "reference_propagation_edges", []
+                    ) or meta.get("reference_propagation_edges", []),
+                    "reference_review_nodes": gt.get("reference_review_nodes", []),
+                    "symptom_node": gt.get("symptom_node", "")
+                    or meta.get("symptom_node", ""),
                 },
                 "metadata": {
                     "scenario_type": meta.get("scenario_type", ""),
                     "scenario_id": meta.get("scenario_id", ""),
                     "difficulty": meta.get("difficulty", "medium"),
                     "n_expected_tool_calls": meta.get("n_tool_calls", 5),
+                    "diagnostic_path_nodes": meta.get("diagnostic_path_nodes", []),
+                    "reference_propagation_edges": meta.get(
+                        "reference_propagation_edges", []
+                    ),
                 },
             })
 
@@ -226,7 +241,13 @@ def prepare_test_scenarios(
 # Real Oracle Environment
 # ============================================================================
 
-def _create_tool_environment():
+def _create_tool_environment(
+    oracle_mode: str = "real",
+    include_system_health: bool = True,
+    expose_status_summary: bool = False,
+    *args,
+    **kwargs,
+):
     """
     Create the real Oracle tool execution environment.
 
@@ -252,8 +273,14 @@ def _create_tool_environment():
         registry = ModelRegistry("outputs/models")
 
         topo_executor = TopologyToolExecutor(builder)
-        pred_executor = PredictionToolExecutor(registry, builder)
-        executor = UnifiedToolExecutor(topo_executor, pred_executor)
+        path_aware = (oracle_mode != "real")
+        pred_executor = PredictionToolExecutor(registry, builder, path_aware=path_aware)
+        executor = UnifiedToolExecutor(
+            topo_executor,
+            pred_executor,
+            include_system_health=include_system_health,
+            expose_status_summary=expose_status_summary,
+        )
 
         logger.info(
             f"Oracle environment loaded: "
@@ -293,6 +320,8 @@ def run_model_evaluation(
     allow_mock: bool = False,
     sampling_strategy: str = "stratified",
     sampling_seed: int = 42,
+    *args,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     Evaluate a single model on the test set with real Oracle environment.
@@ -339,7 +368,14 @@ def run_model_evaluation(
     )
 
     # Create Oracle environment
-    builder, tool_executor, model_registry = _create_tool_environment()
+    oracle_mode = kwargs.get("oracle_mode", "real")
+    include_system_health = kwargs.get("include_system_health", True)
+    expose_status_summary = kwargs.get("expose_status_summary", False)
+    builder, tool_executor, model_registry = _create_tool_environment(
+        oracle_mode=oracle_mode,
+        include_system_health=include_system_health,
+        expose_status_summary=expose_status_summary,
+    )
     if tool_executor is None:
         raise RuntimeError("Oracle environment is unavailable; refusing non-Oracle evaluation")
 
@@ -487,7 +523,7 @@ def _run_episodes_with_model(
         from src.environment.fault_scenario import FaultScenario, create_scenario_state
         from src.environment.diagnostic_path import DiagnosticPath, PathNode
         from src.environment.diagnostic_path import generate_no_fault_path
-        from src.node_models.data_loader import discover_fault_files
+        from src.node_models.data_loader import discover_fault_files, read_fault_file
 
         all_scenarios_path = "outputs/data/all_scenarios.json"
         if os.path.exists(all_scenarios_path):
@@ -510,7 +546,7 @@ def _run_episodes_with_model(
         for sys_id in topo_config.get("systems", {}):
             try:
                 for ff in discover_fault_files("data/lbnl", sys_id):
-                    _file_path_map[(sys_id, ff.filename)] = ff.filepath
+                    _file_path_map[(sys_id, ff.filename)] = ff
                     if ff.is_fault_free or ff.fault_type.lower() == "normal":
                         _normal_file_map.setdefault(sys_id, ff.filename)
             except Exception:
@@ -557,30 +593,33 @@ def _run_episodes_with_model(
                             ),
                         )
                 key = (fs.root_cause_system, fs.source_file)
-                if key not in _csv_cache:
-                    fpath = _file_path_map.get(key)
-                    if fpath and os.path.exists(fpath):
-                        _csv_cache[key] = pd.read_csv(
-                            fpath, nrows=50000, low_memory=False
-                        ).select_dtypes(include=["number"])
+                required_rows = max(50000, fs.time_window_end + 100)
+                cached_df = _csv_cache.get(key)
+                if cached_df is None or len(cached_df) < required_rows:
+                    finfo = _file_path_map.get(key)
+                    if finfo is not None:
+                        _csv_cache[key] = read_fault_file(
+                            finfo, nrows=required_rows, numeric_only=True,
+                        )
                 if key in _csv_cache:
                     try:
                         system_data = {fs.root_cause_system: _csv_cache[key]}
-                        for sys_id in fs.affected_systems:
-                            if sys_id == fs.root_cause_system or sys_id in system_data:
-                                continue
-                            normal_file = _normal_file_map.get(sys_id)
-                            if not normal_file:
+                        for sys_id, normal_file in _normal_file_map.items():
+                            if sys_id in system_data:
                                 continue
                             alt_key = (sys_id, normal_file)
                             if alt_key not in _csv_cache:
-                                fpath = _file_path_map.get(alt_key)
-                                if fpath and os.path.exists(fpath):
-                                    _csv_cache[alt_key] = pd.read_csv(
-                                        fpath, nrows=50000, low_memory=False
-                                    ).select_dtypes(include=["number"])
+                                finfo = _file_path_map.get(alt_key)
+                                if finfo is not None:
+                                    _csv_cache[alt_key] = read_fault_file(
+                                        finfo, nrows=50000, numeric_only=True,
+                                    )
                             if alt_key in _csv_cache:
-                                system_data[sys_id] = _csv_cache[alt_key]
+                                df = _csv_cache[alt_key]
+                                if len(df) < fs.time_window_end:
+                                    repeats = (fs.time_window_end // len(df)) + 1
+                                    df = pd.concat([df] * repeats, ignore_index=True)
+                                system_data[sys_id] = df
                         state = create_scenario_state(
                             fs, system_data,
                             builder, registry=model_registry,
@@ -701,6 +740,8 @@ def run_diagnostic_eval_with_model(
     step: int = 0,
     sampling_strategy: str = "stratified",
     sampling_seed: int = 42,
+    *args,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     Run diagnostic evaluation using an already-loaded model and tokenizer.
@@ -739,7 +780,14 @@ def run_diagnostic_eval_with_model(
     )
 
     # Create Oracle environment
-    builder, tool_executor, model_registry = _create_tool_environment()
+    oracle_mode = kwargs.get("oracle_mode", "real")
+    include_system_health = kwargs.get("include_system_health", True)
+    expose_status_summary = kwargs.get("expose_status_summary", False)
+    builder, tool_executor, model_registry = _create_tool_environment(
+        oracle_mode=oracle_mode,
+        include_system_health=include_system_health,
+        expose_status_summary=expose_status_summary,
+    )
     if tool_executor is None:
         raise RuntimeError("Oracle environment is unavailable; refusing non-Oracle diagnostic eval")
 
@@ -754,7 +802,7 @@ def run_diagnostic_eval_with_model(
             from src.environment.fault_scenario import (
                 FaultScenario, FaultScenarioState, create_scenario_state,
             )
-            from src.node_models.data_loader import discover_fault_files
+            from src.node_models.data_loader import discover_fault_files, read_fault_file
 
             # Load all scenarios as FaultScenario objects
             raw_data = json.load(open(all_scenarios_path, "r", encoding="utf-8"))
@@ -785,12 +833,12 @@ def run_diagnostic_eval_with_model(
                 # Fallback: infer from scenarios
                 systems = list(set(s.root_cause_system for s in scenario_lookup.values()))
 
-            file_path_map = {}  # (sys_id, filename) → filepath
+            file_path_map = {}  # (sys_id, filename) → FaultFileInfo
             for sys_id in systems:
                 try:
                     fault_files = discover_fault_files("data/lbnl", sys_id)
                     for ff in fault_files:
-                        file_path_map[(sys_id, ff.filename)] = ff.filepath
+                        file_path_map[(sys_id, ff.filename)] = ff
                         if ff.is_fault_free or ff.fault_type.lower() == "normal":
                             normal_file_map.setdefault(sys_id, ff.filename)
                 except Exception:
@@ -862,30 +910,33 @@ def run_diagnostic_eval_with_model(
             # Build system_data dict for this scenario
             system_data = {}
             key = (fs.root_cause_system, fs.source_file)
-            if key not in csv_cache:
-                fpath = file_path_map.get(key)
-                if fpath and os.path.exists(fpath):
-                    df = pd.read_csv(fpath, nrows=50000, low_memory=False)
-                    # Select only numeric columns to avoid string conversion errors
-                    numeric_df = df.select_dtypes(include=['number'])
-                    csv_cache[key] = numeric_df
+            required_rows = max(50000, fs.time_window_end + 100)
+            cached_df = csv_cache.get(key)
+            if cached_df is None or len(cached_df) < required_rows:
+                finfo = file_path_map.get(key)
+                if finfo is not None:
+                    csv_cache[key] = read_fault_file(
+                        finfo, nrows=required_rows, numeric_only=True,
+                    )
             if key in csv_cache:
                 system_data[fs.root_cause_system] = csv_cache[key]
 
-            for sys_id in fs.affected_systems:
-                if sys_id == fs.root_cause_system or sys_id in system_data:
-                    continue
-                normal_file = normal_file_map.get(sys_id)
-                if not normal_file:
+            for sys_id, normal_file in normal_file_map.items():
+                if sys_id in system_data:
                     continue
                 alt_key = (sys_id, normal_file)
                 if alt_key not in csv_cache:
-                    fpath = file_path_map.get(alt_key)
-                    if fpath and os.path.exists(fpath):
-                        df = pd.read_csv(fpath, nrows=50000, low_memory=False)
-                        csv_cache[alt_key] = df.select_dtypes(include=['number'])
+                    finfo = file_path_map.get(alt_key)
+                    if finfo is not None:
+                        csv_cache[alt_key] = read_fault_file(
+                            finfo, nrows=50000, numeric_only=True,
+                        )
                 if alt_key in csv_cache:
-                    system_data[sys_id] = csv_cache[alt_key]
+                    df = csv_cache[alt_key]
+                    if len(df) < fs.time_window_end:
+                        repeats = (fs.time_window_end // len(df)) + 1
+                        df = pd.concat([df] * repeats, ignore_index=True)
+                    system_data[sys_id] = df
 
             if not system_data:
                 return None
@@ -1088,8 +1139,149 @@ def _create_mock_episodes(
     import random
     rng = random.Random(42)
 
+    # Initialize helper maps if tool_executor is available
+    scenario_lookup = {}
+    file_path_map = {}
+    normal_file_map = {}
+    csv_cache = {}
+
+    if tool_executor is not None:
+        import os
+        import json as _json
+        import pandas as pd
+        import yaml
+        from dataclasses import replace
+        from src.environment.fault_scenario import FaultScenario, create_scenario_state
+        from src.environment.diagnostic_path import DiagnosticPath, PathNode, generate_no_fault_path
+        from src.node_models.data_loader import discover_fault_files, read_fault_file
+        from src.environment.scenario_matching import match_scenario
+
+        if hasattr(tool_executor, "pred_executor"):
+            builder = tool_executor.pred_executor.topology
+            model_registry = tool_executor.pred_executor.registry
+        else:
+            builder = getattr(tool_executor, "topology", None)
+            model_registry = getattr(tool_executor, "registry", None)
+
+        all_scenarios_path = "outputs/data/all_scenarios.json"
+        if os.path.exists(all_scenarios_path):
+            try:
+                raw = _json.load(open(all_scenarios_path, "r", encoding="utf-8"))
+                for d in raw:
+                    dp = d.pop("diagnostic_path", None)
+                    fs = FaultScenario(**d)
+                    if dp and isinstance(dp, dict):
+                        nodes = [PathNode(**n) for n in dp.get("nodes", [])]
+                        fs.diagnostic_path = DiagnosticPath(
+                            nodes=nodes,
+                            root_cause_node=dp.get("root_cause_node", ""),
+                            fault_type=dp.get("fault_type", ""),
+                            symptom_description=dp.get("symptom_description", ""),
+                        )
+                    scenario_lookup[fs.scenario_id] = fs
+            except Exception:
+                pass
+
+        topo_config = yaml.safe_load(open("configs/topology_config.yaml", "r", encoding="utf-8"))
+        for sys_id in topo_config.get("systems", {}):
+            try:
+                for ff in discover_fault_files("data/lbnl", sys_id):
+                    file_path_map[(sys_id, ff.filename)] = ff
+                    if ff.is_fault_free or ff.fault_type.lower() == "normal":
+                        normal_file_map.setdefault(sys_id, ff.filename)
+            except Exception:
+                pass
+
+        def _load_mock_scenario_state(sid, ground_truth=None, scenario_type: str = ""):
+            fs, _, _ = match_scenario(
+                sid,
+                scenario_lookup,
+                ground_truth=ground_truth,
+                scenario_type=scenario_type,
+            )
+            if fs is None or builder is None:
+                return None
+            try:
+                gt_fault = str((ground_truth or {}).get("fault_type", "")).lower()
+                gt_node = str((ground_truth or {}).get("root_cause_node", "")).lower()
+                is_no_fault = (
+                    "no_fault" in getattr(fs, "scenario_type", "")
+                    or gt_fault in ("normal", "no_fault", "none")
+                    or gt_node in ("none", "")
+                )
+                if is_no_fault:
+                    normal_file = normal_file_map.get(fs.root_cause_system)
+                    if normal_file:
+                        window_size = max(1, fs.time_window_end - fs.time_window_start)
+                        if window_size <= 1:
+                            window_size = 15
+                        fs = replace(
+                            fs,
+                            root_cause_node="none",
+                            fault_type="Normal",
+                            fault_intensity="none",
+                            affected_systems=[fs.root_cause_system],
+                            source_file=normal_file,
+                            time_window_end=fs.time_window_start + window_size,
+                            diagnostic_path=generate_no_fault_path(
+                                fs.root_cause_system, builder,
+                            ),
+                        )
+
+                # Build system_data dict for this scenario
+                system_data = {}
+                key = (fs.root_cause_system, fs.source_file)
+                required_rows = max(50000, fs.time_window_end + 100)
+                cached_df = csv_cache.get(key)
+                if cached_df is None or len(cached_df) < required_rows:
+                    finfo = file_path_map.get(key)
+                    if finfo is not None:
+                        csv_cache[key] = read_fault_file(
+                            finfo, nrows=required_rows, numeric_only=True,
+                        )
+                if key in csv_cache:
+                    system_data[fs.root_cause_system] = csv_cache[key]
+
+                for sys_id, normal_file in normal_file_map.items():
+                    if sys_id in system_data:
+                        continue
+                    alt_key = (sys_id, normal_file)
+                    if alt_key not in csv_cache:
+                        finfo = file_path_map.get(alt_key)
+                        if finfo is not None:
+                            csv_cache[alt_key] = read_fault_file(
+                                finfo, nrows=50000, numeric_only=True,
+                            )
+                    if alt_key in csv_cache:
+                        df = csv_cache[alt_key]
+                        if len(df) < fs.time_window_end:
+                            repeats = (fs.time_window_end // len(df)) + 1
+                            df = pd.concat([df] * repeats, ignore_index=True)
+                        system_data[sys_id] = df
+
+                if not system_data:
+                    return None
+
+                return create_scenario_state(fs, system_data, builder, registry=model_registry)
+            except Exception as ex:
+                logger.warning(f"Mock state creation failed: {ex}")
+                import traceback
+                traceback.print_exc()
+                return None
+
     episodes = []
     for i, scenario in enumerate(scenarios):
+        gt = scenario.get("ground_truth", {})
+        meta = scenario.get("metadata", {})
+        root_system = gt.get("root_cause_system", "")
+        root_node = gt.get("root_cause_node", "")
+
+        # Set scenario state for Oracle predictions
+        if tool_executor is not None:
+            sid = scenario.get("id", scenario.get("metadata", {}).get("scenario_id", ""))
+            stype = scenario.get("metadata", {}).get("scenario_type", "")
+            state = _load_mock_scenario_state(sid, ground_truth=gt, scenario_type=stype)
+            tool_executor.set_scenario_state(state)
         gt = scenario.get("ground_truth", {})
         meta = scenario.get("metadata", {})
         root_system = gt.get("root_cause_system", "")
@@ -1215,10 +1407,9 @@ def compare_models(
     }
 
     metric_names = [
-        "diagnostic_accuracy", "tool_format_validity",
-        "diagnostic_completeness", "search_efficiency",
-        "reasoning_authenticity", "tool_invocation_rationality",
-        "aggregate_score",
+        "paper_DA", "paper_TR",
+        "paper_ECR", "paper_SE",
+        "paper_mean",
     ]
 
     for result in eval_results:

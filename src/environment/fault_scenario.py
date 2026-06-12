@@ -19,7 +19,11 @@ import pandas as pd
 from src.environment.diagnostic_path import (
     DiagnosticPath, DiagnosticPathGenerator, PathNode, generate_no_fault_path,
 )
-from src.node_models.data_loader import discover_fault_files, FaultFileInfo
+from src.node_models.data_loader import (
+    discover_fault_files,
+    FaultFileInfo,
+    get_fault_file_row_count,
+)
 from src.node_models.feature_engineer import build_node_features, compute_window_features
 from src.utils.io_utils import save_json, load_json, setup_logger
 
@@ -74,6 +78,49 @@ class FaultScenarioState:
         return self.sensor_readings.get(node_id, {})
 
 
+def required_nrows_for_scenario(
+    scenario: FaultScenario,
+    minimum: Optional[int] = None,
+    fallback_window: int = 15,
+) -> Optional[int]:
+    """Return the row count needed to cover a scenario's declared window.
+
+    Callers may still provide a minimum for smoke-test throughput control, but
+    the returned value must never be smaller than ``time_window_end``.  Loading
+    fewer rows would force the Oracle onto an unrelated fallback window.
+    """
+    try:
+        start = int(getattr(scenario, "time_window_start", 0) or 0)
+    except (TypeError, ValueError):
+        start = 0
+    try:
+        end = int(getattr(scenario, "time_window_end", 0) or 0)
+    except (TypeError, ValueError):
+        end = 0
+    try:
+        min_rows = int(minimum or 0)
+    except (TypeError, ValueError):
+        min_rows = 0
+
+    needed = end if end > start else start + max(1, int(fallback_window))
+    needed = max(needed, min_rows)
+    return needed if needed > 0 else None
+
+
+def _sample_valid_window_start(
+    rng: random.Random,
+    row_count: int,
+    window_size: int,
+    preferred_min_start: int = 1000,
+) -> Optional[int]:
+    """Sample a time-window start that is valid for the source file length."""
+    max_start = int(row_count) - int(window_size)
+    if max_start < 0:
+        return None
+    lower = min(max(0, int(preferred_min_start)), max_start)
+    return rng.randint(lower, max_start)
+
+
 def create_scenario_state(
     scenario: FaultScenario,
     system_data: Dict[str, pd.DataFrame],
@@ -100,24 +147,27 @@ def create_scenario_state(
     data_cache = {}
 
     # Determine which systems to load sensor data for
-    systems_to_load = set(scenario.affected_systems)
-    systems_to_load.add(scenario.root_cause_system)
+    systems_to_load = set(system_data.keys())
 
     for sys_id in systems_to_load:
         sys_df = system_data.get(sys_id)
         if sys_df is None or sys_df.empty:
             continue
 
-        # Slice to the scenario's time window
+        # Slice to the scenario's declared time window.  Do not silently wrap
+        # around when a caller loaded too few rows: that binds the scenario to
+        # an unrelated operating condition and can make the Oracle contradict
+        # the ground-truth root cause.
         start = scenario.time_window_start
         end = scenario.time_window_end
         if end > start and end <= len(sys_df):
             window_df = sys_df.iloc[start:end]
         else:
-            # Fallback: use a random window of 15 rows
-            max_start = max(0, len(sys_df) - 15)
-            s = min(start % max_start, max_start) if max_start > 0 else 0
-            window_df = sys_df.iloc[s:s + 15]
+            raise ValueError(
+                "Scenario time window is unavailable for "
+                f"{scenario.scenario_id}/{sys_id}: start={start}, end={end}, "
+                f"loaded_rows={len(sys_df)}"
+            )
 
         if window_df.empty:
             continue
@@ -270,7 +320,7 @@ SYMPTOM_TEMPLATES = {
     ],
     "coi_leakage": [
         "The cooling coil valve appears to allow flow even when commanded fully closed.",
-        "Supply air temperature is colder than expected during heating mode.",
+        "Supply air temperature is warmer than expected during cooling demand.",
     ],
     "coi_stuck": [
         "The cooling coil valve is not modulating properly in response to control signals.",
@@ -280,12 +330,67 @@ SYMPTOM_TEMPLATES = {
         "The outdoor air damper does not appear to be responding to control commands.",
         "Mixed air temperature is abnormal, suggesting the outdoor air damper may be stuck.",
     ],
+    "vav_damper_stuck": [
+        "The terminal damper does not appear to be responding to control commands.",
+        "Terminal airflow volume is lower than expected, suggesting the damper may be stuck.",
+    ],
+    "reheat_valve_stuck": [
+        "The reheat valve is not modulating properly in response to control signals.",
+        "Zone temperature cannot reach the heating setpoint because reheat output is limited.",
+    ],
+    "reheat_coil_fouling": [
+        "The reheat coil heat transfer appears degraded.",
+        "Zone temperature cannot reach the heating setpoint because the reheat coil output is too low.",
+    ],
     # General / cross-system
     "normal": [
         "The building automation system reports normal operation, but a routine diagnostic check is requested.",
         "Please verify that all HVAC systems are operating normally.",
     ],
 }
+
+_HEATING_SYMPTOM_PHRASES = [
+    "heating setpoint",
+    "hot water",
+    "reheat",
+    "warm-up",
+    "heating demand",
+    "too cold",
+    "below the setpoint",
+]
+
+_COOLING_SYMPTOM_PHRASES = [
+    "cooling setpoint",
+    "chilled water",
+    "cooling demand",
+    "peak cooling",
+    "too hot",
+    "warmer than expected",
+    "cooling capacity",
+]
+
+
+def _filter_templates_by_mode(templates: List[str], fault_type: str) -> List[str]:
+    """Keep symptom templates aligned with the fault's thermal direction."""
+    fault = fault_type.lower()
+    if any(k in fault for k in ("dmprstuck", "vavdmpr", "oadmpr", "oablockage", "damper")):
+        blocked = _HEATING_SYMPTOM_PHRASES + _COOLING_SYMPTOM_PHRASES
+        filtered = [
+            tmpl for tmpl in templates
+            if any(word in tmpl.lower() for word in ("damper", "airflow", "pressure", "mixed air", "outdoor air", "terminal"))
+        ]
+        return filtered or list(templates)
+    if any(k in fault for k in ("heating", "reheat", "hot_water", "boiler", "hwc", "hwl")):
+        blocked = _COOLING_SYMPTOM_PHRASES
+    elif any(k in fault for k in ("cooling", "chiller", "chilled", "evap", "cond", "coolingtower", "chwc", "coi")):
+        blocked = _HEATING_SYMPTOM_PHRASES
+    else:
+        return list(templates)
+    filtered = [
+        tmpl for tmpl in templates
+        if not any(phrase in tmpl.lower() for phrase in blocked)
+    ]
+    return filtered or list(templates)
 
 # Default symptom for unmatched fault types
 DEFAULT_SYMPTOMS = [
@@ -307,6 +412,7 @@ def _get_symptom_description(fault_type: str, system_name: str) -> str:
     if templates is None:
         templates = DEFAULT_SYMPTOMS
 
+    templates = _filter_templates_by_mode(list(templates), fault_type)
     desc = random.choice(templates)
     return f"[{system_name}] {desc}"
 
@@ -330,12 +436,43 @@ def generate_single_system_scenarios(
     rng = random.Random(random_state)
     files = discover_fault_files(data_root, system_id)
     scenarios = []
+    skipped_short_files = 0
     components = topology_builder.get_system_components(system_id)
 
     for finfo in files:
+        try:
+            row_count = get_fault_file_row_count(finfo)
+        except Exception as exc:
+            logger.warning(
+                "Skipping %s/%s: failed to read row count: %s",
+                system_id,
+                finfo.filename,
+                exc,
+            )
+            skipped_short_files += 1
+            continue
+        if row_count < window_size:
+            logger.warning(
+                "Skipping %s/%s: row_count=%s < window_size=%s",
+                system_id,
+                finfo.filename,
+                row_count,
+                window_size,
+            )
+            skipped_short_files += 1
+            continue
+
         if finfo.is_fault_free:
             # Generate "no fault" scenarios
             for i in range(min(n_windows_per_fault, 3)):
+                start = _sample_valid_window_start(
+                    rng,
+                    row_count=row_count,
+                    window_size=window_size,
+                    preferred_min_start=1000,
+                )
+                if start is None:
+                    continue
                 no_fault_path = generate_no_fault_path(system_id, topology_builder, rng)
                 scenario = FaultScenario(
                     scenario_id=f"{system_id}_nofault_{i}",
@@ -353,18 +490,24 @@ def generate_single_system_scenarios(
                     ],
                     diagnostic_path=no_fault_path,
                     source_file=finfo.filename,
-                    time_window_start=rng.randint(1000, 50000),
-                    time_window_end=0,
+                    time_window_start=start,
+                    time_window_end=start + window_size,
                     difficulty="easy",
                 )
-                scenario.time_window_end = scenario.time_window_start + window_size
                 scenarios.append(scenario)
         else:
             # Generate fault scenarios with diagnostic paths
             root_node = _infer_root_cause_node(finfo.fault_type, system_id, components)
 
             for i in range(n_windows_per_fault):
-                start = rng.randint(1000, 400000)
+                start = _sample_valid_window_start(
+                    rng,
+                    row_count=row_count,
+                    window_size=window_size,
+                    preferred_min_start=1000,
+                )
+                if start is None:
+                    continue
 
                 # Generate guided diagnostic path
                 diag_path = None
@@ -401,6 +544,12 @@ def generate_single_system_scenarios(
                 scenarios.append(scenario)
 
     logger.info(f"Generated {len(scenarios)} single-system scenarios for '{system_id}'")
+    if skipped_short_files:
+        logger.warning(
+            "Skipped %s files for '%s' because no valid time window was available",
+            skipped_short_files,
+            system_id,
+        )
     return scenarios
 
 
@@ -408,7 +557,7 @@ def generate_cross_system_scenarios(
     single_scenarios: List[FaultScenario],
     topology_builder,
     path_generator: Optional[DiagnosticPathGenerator] = None,
-    n_scenarios: int = 200,
+    n_scenarios: int = 600,
     random_state: int = 42,
 ) -> List[FaultScenario]:
     """
@@ -432,7 +581,11 @@ def generate_cross_system_scenarios(
         return []
 
     cross_scenarios = []
-    for i in range(min(n_scenarios, len(upstream_faults) * 3)):
+    attempts = 0
+    max_attempts = max(n_scenarios * 5, 100)
+    while len(cross_scenarios) < n_scenarios and attempts < max_attempts:
+        attempts += 1
+        i = len(cross_scenarios)
         base = rng.choice(upstream_faults)
 
         # Find downstream systems
@@ -447,7 +600,7 @@ def generate_cross_system_scenarios(
         if not downstream_systems:
             continue
 
-        affected = [base.root_cause_system] + list(downstream_systems)
+        affected = [base.root_cause_system] + sorted(downstream_systems)
         ds_system = rng.choice(list(downstream_systems))
 
         # Generate cross-system diagnostic path

@@ -38,12 +38,35 @@ Thumbs.db
 desktop.ini
 
 # ==================================
-# Logs & Tracking
+# Model Outputs (large files)
+# ==================================
+outputs/models/
+outputs/sft/
+outputs/rl/
+outputs/evaluation/
+outputs/topology/
+outputs/cache/
+
+# ==================================
+# Generated Data (reproducible)
+# ==================================
+outputs/data/sft_train.jsonl
+outputs/data/sft_val.jsonl
+outputs/data/rl_train.jsonl
+outputs/data/rl_val.jsonl
+outputs/data/all_scenarios.json
+
+# ==================================
+# Raw Dataset (download separately)
+# ==================================
+data/lbnl/
+
+# ==================================
+# Logs & Temp
 # ==================================
 *.log
 wandb/
 runs/
-.mlflow/
 .gemini/
 
 # ==================================
@@ -53,15 +76,11 @@ runs/
 *.ipynb
 
 # ==================================
-# Raw Dataset (never upload)
+# Debug / Scratch scripts
 # ==================================
-data/
-
-# ==================================
-# Paper / Docs (optional ignore)
-# ==================================
-paper/
-paper_en/
+scripts/_*.py
+!scripts/_rl_preflight.py
+!scripts/_server_validate.py
 
 # ==================================
 # Local Web Visualization
@@ -69,31 +88,7 @@ paper_en/
 web-viz/
 
 # ==================================
-# ================================
-# CORE RULE: only keep code dirs
-# ================================
+# Paper
 # ==================================
-
-# ❌ Ignore everything inside outputs
-outputs/*
-
-# ✔ But keep directory structure
-!outputs/
-!outputs/**/
-
-# ✔ Only keep empty placeholders (.gitkeep)
-!outputs/**/.gitkeep
-
-
-# ==================================
-# scripts rules (only code, no temp)
-# ==================================
-scripts/_*.py
-!scripts/_rl_preflight.py
-!scripts/_server_validate.py
-
-# ==================================
-# IMPORTANT NOTE:
-# configs/ and src/ are NOT ignored
-# (so they are fully tracked by git)
-# ==================================
+paper/
+paper_en/

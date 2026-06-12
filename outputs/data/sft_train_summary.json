@@ -1,15 +1,22 @@
 {
+  "design_version": "context_preserved_terminal_closure_v2026_06_03",
+  "system_prompt_sha256": "c5dd520a5b0bd8513622a91802e26ff5fd7e8f25022f5c6fac3675b6608b20df",
   "total_examples": 3000,
+  "base_examples": 3000,
+  "terminal_closure_examples": 0,
   "format": "sharegpt",
   "scenario_type_counts": {
-    "na_low_confidence": 120,
-    "a_single_system": 630,
-    "a_cross_system": 510,
-    "na_cross_system": 510,
-    "na_single_system": 750,
-    "na_no_fault": 210,
-    "a_low_confidence": 270
+    "a_cross_system": 600,
+    "na_no_fault": 420,
+    "a_low_confidence": 270,
+    "na_single_system": 480,
+    "na_cross_system": 540,
+    "a_single_system": 420,
+    "na_low_confidence": 270
   },
-  "avg_turns": 15.243333333333334,
-  "avg_tool_calls": 6.621666666666667
+  "augmentation_type_counts": {
+    "full_trajectory": 3000
+  },
+  "avg_turns": 13.451333333333332,
+  "avg_tool_calls": 5.725666666666666
 }

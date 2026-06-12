@@ -319,6 +319,15 @@ class TopologyBuilder:
                     "medium": data.get("medium", ""),
                     **self.graph.nodes[source],
                 })
+            elif data.get("relation") == EDGE_HAS_PART:
+                parent_node = self.graph.nodes[source]
+                if parent_node.get("level") == LEVEL_NODE:
+                    upstream.append({
+                        "node_id": source,
+                        "relation": "parent_assembly",
+                        "medium": "",
+                        **parent_node,
+                    })
         return upstream
 
     def get_all_component_nodes(self) -> List[Dict[str, Any]]:

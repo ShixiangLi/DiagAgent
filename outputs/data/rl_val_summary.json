@@ -1,13 +1,18 @@
 {
-  "total_prompts": 657,
+  "design_version": "context_preserved_terminal_closure_v2026_06_03",
+  "system_prompt_sha256": "c5dd520a5b0bd8513622a91802e26ff5fd7e8f25022f5c6fac3675b6608b20df",
+  "total_prompts": 535,
   "scenario_type_counts": {
-    "a_single_system": 123,
-    "a_low_confidence": 123,
-    "na_low_confidence": 123,
-    "na_no_fault": 123,
-    "single_system": 123,
-    "no_fault": 2,
-    "cross_system": 20,
-    "a_cross_system": 20
-  }
+    "na_no_fault": 100,
+    "a_low_confidence": 125,
+    "na_low_confidence": 125,
+    "a_single_system": 58,
+    "a_cross_system": 33,
+    "cross_system": 33,
+    "single_system": 58,
+    "no_fault": 3
+  },
+  "unique_user_prompts": 514,
+  "unique_user_prompt_rate": 0.9607476635514018,
+  "leakage_group_count": 26
 }

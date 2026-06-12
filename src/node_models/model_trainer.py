@@ -14,6 +14,7 @@ Handles:
 import os
 import json
 import pickle
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -37,6 +38,15 @@ def _compute_class_weights(y: np.ndarray) -> Dict[int, float]:
     return weights
 
 
+def _numeric_sensor_columns(system_df: pd.DataFrame) -> List[str]:
+    """Return trainable numeric CSV columns, excluding labels/metadata."""
+    exclude_cols = {"fault_label", "fault_label_str", "source_file", "Datetime"}
+    return [
+        c for c in system_df.select_dtypes(include=["number"]).columns
+        if c not in exclude_cols
+    ]
+
+
 def train_node_model(
     features: pd.DataFrame,
     feature_cols: List[str],
@@ -47,6 +57,13 @@ def train_node_model(
     use_smote: bool = True,
     test_size: float = 0.15,
     random_state: int = 42,
+    model_filename: str = "model.txt",
+    metadata_filename: str = "metadata.json",
+    model_role: str = "fault_classifier",
+    extra_metadata: Optional[Dict[str, Any]] = None,
+    num_boost_round: int = 500,
+    early_stopping_rounds: int = 30,
+    max_samples_per_class: Optional[int] = 2500,
 ) -> Dict[str, Any]:
     """
     Train a LightGBM classifier for a single node.
@@ -98,6 +115,29 @@ def train_node_model(
         old_name = reverse_label_map.get(old_label, str(old_label))
         remapped_reverse[new_label] = old_name
     reverse_label_map = remapped_reverse
+
+    original_n_samples = len(y)
+    if max_samples_per_class and max_samples_per_class > 0:
+        rng = np.random.default_rng(random_state)
+        selected_parts = []
+        for cls in sorted(np.unique(y)):
+            cls_idx = np.flatnonzero(y == cls)
+            if len(cls_idx) > max_samples_per_class:
+                cls_idx = rng.choice(cls_idx, size=max_samples_per_class, replace=False)
+            selected_parts.append(cls_idx)
+        selected_idx = np.concatenate(selected_parts)
+        rng.shuffle(selected_idx)
+        if len(selected_idx) < len(y):
+            X = X[selected_idx]
+            y = y[selected_idx]
+            logger.info(
+                "  Window cap for %s: %d -> %d samples "
+                "(max_samples_per_class=%d)",
+                node_id,
+                original_n_samples,
+                len(y),
+                max_samples_per_class,
+            )
 
     # Decide: multi-class or binary
     is_binary = n_classes == 2
@@ -156,15 +196,32 @@ def train_node_model(
     val_set = lgb.Dataset(X_val, y_val, reference=train_set)
 
     # Train with early stopping
+    train_started = time.time()
+    logger.info(
+        "  LightGBM start for %s: train=%d, val=%d, features=%d, "
+        "classes=%d, max_rounds=%d",
+        node_id,
+        len(X_train),
+        len(X_val),
+        len(feature_cols),
+        n_classes,
+        num_boost_round,
+    )
     model = lgb.train(
         params,
         train_set,
-        num_boost_round=500,
+        num_boost_round=num_boost_round,
         valid_sets=[val_set],
         callbacks=[
-            lgb.early_stopping(stopping_rounds=30, verbose=False),
-            lgb.log_evaluation(period=0),
+            lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False),
+            lgb.log_evaluation(period=50),
         ],
+    )
+    logger.info(
+        "  LightGBM done for %s in %.1fs (best_iteration=%s)",
+        node_id,
+        time.time() - train_started,
+        getattr(model, "best_iteration", None),
     )
 
     # Evaluate
@@ -190,16 +247,47 @@ def train_node_model(
         f"weighted-F1={f1:.4f}, classes={n_classes}"
     )
 
+    # ---- Temperature calibration (EPO, eq:epo_temperature) ----
+    # Fit a single positive temperature on the validation split so the evidence
+    # projection / closure signals used by EPO are calibrated rather than
+    # over-confident. Binary models use a 2-column logit view.
+    calibration = {"temperature": 1.0, "status": "skipped"}
+    try:
+        from src.node_models.calibration import fit_temperature
+
+        val_raw = model.predict(X_val, raw_score=True)
+        val_raw = np.asarray(val_raw)
+        if is_binary:
+            # raw_score is a 1D margin; build a 2-column logit matrix [0, m].
+            margin = val_raw.reshape(-1)
+            val_logits = np.column_stack([np.zeros_like(margin), margin])
+        else:
+            val_logits = val_raw if val_raw.ndim == 2 else val_raw.reshape(len(y_val), -1)
+        calibration = fit_temperature(val_logits, np.asarray(y_val).astype(int))
+        logger.info(
+            "  Node %s calibration: T=%.3f NLL %.4f->%.4f ECE %.4f->%.4f (%s)",
+            node_id,
+            calibration.get("temperature", 1.0),
+            calibration.get("nll_before") or float("nan"),
+            calibration.get("nll_after") or float("nan"),
+            calibration.get("ece_before") or float("nan"),
+            calibration.get("ece_after") or float("nan"),
+            calibration.get("status"),
+        )
+    except Exception as exc:  # calibration must never break training
+        logger.warning(f"  Node {node_id}: temperature calibration skipped: {exc}")
+
     # Save model
     safe_node_id = node_id.replace("::", "__").replace("/", "_")
     model_dir = ensure_dir(os.path.join(output_dir, safe_node_id))
-    model_path = os.path.join(model_dir, "model.txt")
+    model_path = os.path.join(model_dir, model_filename)
     model.save_model(model_path)
 
     # Save metadata
     metadata = {
         "node_id": node_id,
         "status": "trained",
+        "model_role": model_role,
         "model_path": model_path,
         "n_classes": n_classes,
         "is_binary": is_binary,
@@ -207,13 +295,19 @@ def train_node_model(
         "reverse_label_map": {str(k): v for k, v in reverse_label_map.items()},
         "feature_cols": feature_cols,
         "n_features": len(feature_cols),
+        "n_samples_before_cap": original_n_samples,
+        "max_samples_per_class": max_samples_per_class,
         "n_train_samples": len(X_train),
         "n_val_samples": len(X_val),
         "accuracy": accuracy,
         "weighted_f1": f1,
         "classification_report": report,
+        "calibration_temperature": float(calibration.get("temperature", 1.0)),
+        "calibration": calibration,
     }
-    save_json(metadata, os.path.join(model_dir, "metadata.json"))
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    save_json(metadata, os.path.join(model_dir, metadata_filename))
 
     return metadata
 
@@ -226,6 +320,7 @@ def train_system_oracle_model(
     output_dir: str = "models",
     window_size: int = 15,
     stride: int = 15,
+    max_samples_per_class: Optional[int] = 2500,
 ) -> Dict[str, Any]:
     """
     Train a single system-level oracle model using ALL sensors.
@@ -260,14 +355,19 @@ def train_system_oracle_model(
         logger.warning(f"No sensors found for system {system_id}")
         return {"node_id": f"{system_id}::oracle", "status": "skipped", "reason": "no_sensors"}
 
+    numeric_cols = _numeric_sensor_columns(system_df)
+    oracle_sensors = numeric_cols or all_sensors
     logger.info(
         f"  Training system oracle for '{system_id}' "
-        f"({len(all_sensors)} sensors across {len(components)} components)"
+        f"({len(oracle_sensors)} CSV numeric sensors, "
+        f"{len(all_sensors)} topology sensors across {len(components)} components)"
     )
 
-    # Build features using ALL sensors
+    # Build features using all numeric CSV sensors.  The system Oracle is the
+    # high-reliability whole-system model, so it should not be limited by
+    # incomplete TTL sensor coverage (notably FCU).
     feat_df, feature_cols = build_node_features(
-        system_df, all_sensors,
+        system_df, oracle_sensors,
         window_size=window_size, stride=stride,
     )
 
@@ -279,11 +379,7 @@ def train_system_oracle_model(
             f"  Topology sensor names didn't match CSV columns for '{system_id}'. "
             f"Falling back to all numeric columns."
         )
-        exclude_cols = {"fault_label", "fault_label_str", "source_file", "Datetime"}
-        numeric_cols = [
-            c for c in system_df.select_dtypes(include=["number"]).columns
-            if c not in exclude_cols
-        ]
+        numeric_cols = _numeric_sensor_columns(system_df)
         if numeric_cols:
             feat_df, feature_cols = build_node_features(
                 system_df, numeric_cols,
@@ -306,6 +402,8 @@ def train_system_oracle_model(
         label_map=label_map,
         node_id=oracle_node_id,
         output_dir=os.path.join(output_dir, system_id),
+        use_smote=False,
+        max_samples_per_class=max_samples_per_class,
     )
 
     # Build fault-type → root-cause-node mapping
@@ -347,6 +445,82 @@ def _build_fault_node_mapping(
     return fault_node_map
 
 
+def train_node_responsibility_model(
+    features: pd.DataFrame,
+    feature_cols: List[str],
+    node_id: str,
+    fault_node_map: Dict[str, str],
+    output_dir: str = "models",
+    threshold: float = 0.60,
+    min_positive: int = 4,
+    use_smote: bool = True,
+    random_state: int = 42,
+    max_samples_per_class: Optional[int] = 2500,
+) -> Dict[str, Any]:
+    """
+    Train a binary per-node responsibility model.
+
+    Legacy per-node classifiers try to predict every fault label from local
+    sensors, which is underdetermined for many HVAC components.  The
+    responsibility model asks a narrower question: "is this node the root cause
+    for the current system window?"  This makes the fallback useful as
+    reliability-weighted evidence without forcing local sensors to classify all
+    possible system-level faults.
+    """
+    if features.empty or not feature_cols or "fault_label_str" not in features.columns:
+        return {
+            "node_id": node_id,
+            "status": "skipped",
+            "reason": "no_features_or_labels",
+            "model_role": "per_node_responsibility",
+        }
+
+    resp_df = features.copy()
+
+    def _is_responsible(label: str) -> int:
+        label = str(label)
+        if label.lower() == "normal":
+            return 0
+        return int(fault_node_map.get(label) == node_id)
+
+    resp_df["responsibility_label"] = resp_df["fault_label_str"].map(_is_responsible).astype(int)
+    positives = int(resp_df["responsibility_label"].sum())
+    negatives = int(len(resp_df) - positives)
+    if positives < min_positive or negatives < min_positive:
+        return {
+            "node_id": node_id,
+            "status": "skipped",
+            "reason": "insufficient_positive_or_negative_windows",
+            "model_role": "per_node_responsibility",
+            "positive_windows": positives,
+            "negative_windows": negatives,
+        }
+
+    result = train_node_model(
+        features=resp_df,
+        feature_cols=feature_cols,
+        label_col="responsibility_label",
+        label_map={"Normal": 0, "Responsible": 1},
+        node_id=node_id,
+        output_dir=output_dir,
+        use_smote=use_smote,
+        random_state=random_state,
+        model_filename="responsibility_model.txt",
+        metadata_filename="responsibility_metadata.json",
+        model_role="per_node_responsibility",
+        extra_metadata={
+            "responsibility_threshold": threshold,
+            "positive_windows": positives,
+            "negative_windows": negatives,
+            "target_definition": "1 iff fault_label_str maps to this root-cause node",
+        },
+        num_boost_round=300,
+        early_stopping_rounds=20,
+        max_samples_per_class=max_samples_per_class,
+    )
+    return result
+
+
 def train_all_system_models(
     system_df: pd.DataFrame,
     system_id: str,
@@ -356,6 +530,8 @@ def train_all_system_models(
     window_size: int = 15,
     stride: int = 15,
     max_rows_per_file: Optional[int] = None,
+    train_responsibility: bool = False,
+    max_samples_per_class: Optional[int] = 2500,
 ) -> List[Dict[str, Any]]:
     """
     Train models for a system: one system-level oracle + per-node models.
@@ -386,6 +562,7 @@ def train_all_system_models(
         system_df, system_id, topology_builder, label_map,
         output_dir=output_dir,
         window_size=window_size, stride=stride,
+        max_samples_per_class=max_samples_per_class,
     )
     results.append(oracle_result)
 
@@ -400,6 +577,17 @@ def train_all_system_models(
     # 2. Train PER-NODE models (lower accuracy, local sensors only)
     # ================================================================
     components = topology_builder.get_system_components(system_id)
+    fault_node_map = {}
+    if oracle_result.get("status") == "trained":
+        fault_node_map = oracle_result.get("fault_node_map", {}) or {}
+    if not fault_node_map:
+        fault_node_map = _build_fault_node_mapping(system_id, components, label_map)
+    responsible_nodes = {
+        node
+        for fault_label, node in fault_node_map.items()
+        if str(fault_label).lower() != "normal" and node not in ("", "none", None)
+    }
+
     logger.info(
         f"Training per-node models for {len(components)} components in '{system_id}'"
     )
@@ -428,6 +616,23 @@ def train_all_system_models(
             window_size=window_size, stride=stride,
         )
 
+        if (feat_df.empty or not feature_cols) and len(components) == 1:
+            numeric_cols = _numeric_sensor_columns(system_df)
+            if numeric_cols:
+                logger.warning(
+                    "  Local sensor names did not match CSV columns for %s; "
+                    "falling back to all numeric columns because '%s' has a "
+                    "single component.",
+                    node_id,
+                    system_id,
+                )
+                feat_df, feature_cols = build_node_features(
+                    system_df,
+                    numeric_cols,
+                    window_size=window_size,
+                    stride=stride,
+                )
+
         if feat_df.empty or not feature_cols:
             results.append({
                 "node_id": node_id,
@@ -443,8 +648,30 @@ def train_all_system_models(
             label_map=label_map,
             node_id=node_id,
             output_dir=os.path.join(output_dir, system_id),
+            use_smote=False,
+            max_samples_per_class=max_samples_per_class,
         )
         results.append(result)
+
+        if train_responsibility:
+            if node_id not in responsible_nodes:
+                resp_result = {
+                    "node_id": node_id,
+                    "status": "skipped",
+                    "reason": "no_positive_fault_mapping",
+                    "model_role": "per_node_responsibility",
+                }
+            else:
+                resp_result = train_node_responsibility_model(
+                    features=feat_df,
+                    feature_cols=feature_cols,
+                    node_id=node_id,
+                    fault_node_map=fault_node_map,
+                    output_dir=os.path.join(output_dir, system_id),
+                    use_smote=False,
+                    max_samples_per_class=max_samples_per_class,
+                )
+            results.append(resp_result)
 
     trained = sum(1 for r in results if r.get("status") == "trained")
     logger.info(
@@ -453,3 +680,97 @@ def train_all_system_models(
     )
     return results
 
+
+def train_all_responsibility_models(
+    system_df: pd.DataFrame,
+    system_id: str,
+    topology_builder,
+    label_map: Dict[str, int],
+    output_dir: str = "models",
+    window_size: int = 15,
+    stride: int = 15,
+    max_samples_per_class: Optional[int] = 2500,
+) -> List[Dict[str, Any]]:
+    """Train only binary per-node responsibility models for one system."""
+    from src.node_models.feature_engineer import build_node_features
+
+    components = topology_builder.get_system_components(system_id)
+    fault_node_map = _build_fault_node_mapping(system_id, components, label_map)
+    responsible_nodes = {
+        node
+        for fault_label, node in fault_node_map.items()
+        if str(fault_label).lower() != "normal" and node not in ("", "none", None)
+    }
+    results: List[Dict[str, Any]] = []
+
+    logger.info(
+        f"Training responsibility models for {len(components)} components in '{system_id}'"
+    )
+    for comp in components:
+        node_id = comp["node_id"]
+        sensor_names = comp.get("sensor_names", [])
+        if node_id not in responsible_nodes:
+            results.append({
+                "node_id": node_id,
+                "status": "skipped",
+                "reason": "no_positive_fault_mapping",
+                "model_role": "per_node_responsibility",
+            })
+            continue
+        if not sensor_names:
+            results.append({
+                "node_id": node_id,
+                "status": "skipped",
+                "reason": "no_sensors",
+                "model_role": "per_node_responsibility",
+            })
+            continue
+
+        feat_df, feature_cols = build_node_features(
+            system_df,
+            sensor_names,
+            window_size=window_size,
+            stride=stride,
+        )
+        if (feat_df.empty or not feature_cols) and len(components) == 1:
+            numeric_cols = _numeric_sensor_columns(system_df)
+            if numeric_cols:
+                logger.warning(
+                    "  Local sensor names did not match CSV columns for %s; "
+                    "falling back to all numeric columns because '%s' has a "
+                    "single component.",
+                    node_id,
+                    system_id,
+                )
+                feat_df, feature_cols = build_node_features(
+                    system_df,
+                    numeric_cols,
+                    window_size=window_size,
+                    stride=stride,
+                )
+        if feat_df.empty or not feature_cols:
+            results.append({
+                "node_id": node_id,
+                "status": "skipped",
+                "reason": "no_valid_features",
+                "model_role": "per_node_responsibility",
+            })
+            continue
+
+        results.append(
+            train_node_responsibility_model(
+                features=feat_df,
+                feature_cols=feature_cols,
+                node_id=node_id,
+                fault_node_map=fault_node_map,
+                output_dir=os.path.join(output_dir, system_id),
+                use_smote=False,
+                max_samples_per_class=max_samples_per_class,
+            )
+        )
+
+    trained = sum(1 for r in results if r.get("status") == "trained")
+    logger.info(
+        f"System '{system_id}': {trained}/{len(results)} responsibility models trained"
+    )
+    return results

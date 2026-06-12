@@ -1,0 +1,11 @@
+{
+  "kept_no_fault": 1254,
+  "fault_type_hard_mismatch": 1686,
+  "kept_fault_exact": 4476,
+  "fault_type_family_mismatch": 536,
+  "fault_miss": 22,
+  "input": 7974,
+  "output": 5730,
+  "groups_input": 254,
+  "groups_output": 254
+}

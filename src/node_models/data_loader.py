@@ -11,6 +11,7 @@ Handles:
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,6 +20,11 @@ import pandas as pd
 from src.utils.io_utils import setup_logger
 
 logger = setup_logger(__name__)
+
+DEFAULT_PARQUET_CACHE_DIR = os.environ.get(
+    "DIAGAGENT_PARQUET_CACHE",
+    "outputs/cache/parquet",
+)
 
 
 @dataclass
@@ -31,6 +37,190 @@ class FaultFileInfo:
     fault_intensity: str     # e.g., "-2", "075", "Severe"
     is_fault_free: bool
     label: str               # Human-readable label for this fault scenario
+
+
+def get_parquet_cache_path(
+    finfo: FaultFileInfo,
+    cache_dir: Optional[str] = None,
+) -> str:
+    """Return the deterministic Parquet cache path for a raw LBNL CSV file."""
+    root = Path(cache_dir or DEFAULT_PARQUET_CACHE_DIR)
+    return str(root / finfo.system_id / f"{Path(finfo.filename).stem}.parquet")
+
+
+def _is_parquet_cache_fresh(finfo: FaultFileInfo, parquet_path: str) -> bool:
+    """A cache is fresh if it exists and is not older than its source CSV."""
+    if not os.path.exists(parquet_path):
+        return False
+    trust_cache = os.environ.get("DIAGAGENT_TRUST_PARQUET_CACHE", "").lower()
+    if trust_cache in {"1", "true", "yes"}:
+        return True
+    if not os.path.exists(finfo.filepath):
+        # Cache-only training deployments intentionally omit raw CSV files.
+        return True
+    try:
+        return os.path.getmtime(parquet_path) >= os.path.getmtime(finfo.filepath)
+    except OSError:
+        return False
+
+
+def get_fault_file_read_source(
+    finfo: FaultFileInfo,
+    cache_dir: Optional[str] = None,
+    use_parquet_cache: bool = True,
+) -> Tuple[str, str]:
+    """Return the storage source that read_fault_file will try first."""
+    disable_env = os.environ.get("DIAGAGENT_DISABLE_PARQUET", "").lower()
+    parquet_enabled = use_parquet_cache and disable_env not in {"1", "true", "yes"}
+    parquet_path = get_parquet_cache_path(finfo, cache_dir)
+    if parquet_enabled and _is_parquet_cache_fresh(finfo, parquet_path):
+        return "parquet", parquet_path
+    return "csv", finfo.filepath
+
+
+def get_fault_file_row_count(
+    finfo: FaultFileInfo,
+    cache_dir: Optional[str] = None,
+    use_parquet_cache: bool = True,
+) -> int:
+    """Return the number of data rows in a fault file without loading it all."""
+    source, source_path = get_fault_file_read_source(
+        finfo,
+        cache_dir=cache_dir,
+        use_parquet_cache=use_parquet_cache,
+    )
+    if source == "parquet":
+        try:
+            import pyarrow.parquet as pq
+
+            return int(pq.ParquetFile(source_path).metadata.num_rows)
+        except Exception:
+            return int(pd.read_parquet(source_path).shape[0])
+
+    rows = 0
+    with open(source_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            rows += chunk.count(b"\n")
+    # CSV row count excludes the header.  If the final line has no trailing
+    # newline this may under-count by one; the conservative value is safer for
+    # window sampling.
+    return max(0, rows - 1)
+
+
+def _parquet_stub_source_path(system_id: str, filename: str) -> str:
+    """Return a stable placeholder source path for cache-only deployments."""
+    return os.path.join(
+        "parquet_cache_only",
+        system_id,
+        f"{Path(filename).stem}.csv",
+    )
+
+
+def _discover_fault_files_from_parquet_cache(
+    system_id: str,
+    csv_pattern: str,
+    parser,
+) -> List[FaultFileInfo]:
+    """Discover file metadata from Parquet cache when raw CSV files are absent."""
+    cache_dir = Path(DEFAULT_PARQUET_CACHE_DIR) / system_id
+    if not cache_dir.is_dir():
+        return []
+
+    pattern = "^" + re.escape(csv_pattern).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+    regex = re.compile(pattern, re.IGNORECASE)
+    files: List[FaultFileInfo] = []
+    for parquet_path in sorted(cache_dir.glob("*.parquet")):
+        fname = f"{parquet_path.stem}.csv"
+        if not regex.match(fname):
+            continue
+        fault_type, intensity, is_ff = parser(fname)
+        label = "Normal" if is_ff else f"{fault_type}_{intensity}"
+        files.append(FaultFileInfo(
+            filepath=_parquet_stub_source_path(system_id, fname),
+            filename=fname,
+            system_id=system_id,
+            fault_type=fault_type,
+            fault_intensity=intensity,
+            is_fault_free=is_ff,
+            label=label,
+        ))
+    if files:
+        logger.info(
+            "Discovered %s Parquet cache files for '%s' "
+            "(%s fault-free, %s faulted)",
+            len(files),
+            system_id,
+            sum(1 for f in files if f.is_fault_free),
+            sum(1 for f in files if not f.is_fault_free),
+        )
+    return files
+
+
+def _read_parquet(path: str, nrows: Optional[int] = None) -> pd.DataFrame:
+    """Read a Parquet file, honoring nrows without materializing the full file."""
+    if nrows is None:
+        return pd.read_parquet(path)
+
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        parquet_file = pq.ParquetFile(path)
+        batches = []
+        remaining = max(int(nrows), 0)
+        if remaining == 0:
+            return pd.DataFrame()
+        for batch in parquet_file.iter_batches(batch_size=min(remaining, 65536)):
+            if remaining <= 0:
+                break
+            if batch.num_rows > remaining:
+                batch = batch.slice(0, remaining)
+            batches.append(batch)
+            remaining -= batch.num_rows
+        if not batches:
+            return pd.DataFrame()
+        return pa.Table.from_batches(batches).to_pandas()
+    except Exception:
+        # Fallback for environments where pyarrow batch APIs differ.
+        return pd.read_parquet(path).head(nrows)
+
+
+def read_fault_file(
+    finfo: FaultFileInfo,
+    nrows: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    use_parquet_cache: bool = True,
+    numeric_only: bool = False,
+) -> pd.DataFrame:
+    """Read one LBNL fault file, preferring the Parquet cache when available.
+
+    The Parquet cache is a lossless storage optimization. It must not change
+    row order, sampling, labels, or feature engineering behavior.
+    """
+    df: pd.DataFrame
+    source, source_path = get_fault_file_read_source(
+        finfo,
+        cache_dir=cache_dir,
+        use_parquet_cache=use_parquet_cache,
+    )
+
+    if source == "parquet":
+        try:
+            df = _read_parquet(source_path, nrows=nrows)
+            logger.debug("  Loaded Parquet cache: %s", source_path)
+        except Exception as exc:
+            logger.warning(
+                "  Failed to load Parquet cache for %s, falling back to CSV: %s",
+                finfo.filename,
+                exc,
+            )
+            df = pd.read_csv(finfo.filepath, nrows=nrows, low_memory=False)
+    else:
+        df = pd.read_csv(finfo.filepath, nrows=nrows, low_memory=False)
+
+    if numeric_only:
+        df = df.select_dtypes(include=["number"])
+    return df
 
 
 # ============================================================================
@@ -206,32 +396,38 @@ def discover_fault_files(data_root: str, system_id: str) -> List[FaultFileInfo]:
 
     csv_dir = os.path.join(base_dir, sys_map["subdir"]) if sys_map["subdir"] else base_dir
 
-    if not os.path.isdir(csv_dir):
-        logger.warning(f"CSV directory not found: {csv_dir}")
-        return []
-
     files = []
-    for fname in sorted(os.listdir(csv_dir)):
-        if not fname.endswith(".csv"):
-            continue
+    if os.path.isdir(csv_dir):
+        for fname in sorted(os.listdir(csv_dir)):
+            if not fname.endswith(".csv"):
+                continue
 
-        fpath = os.path.join(csv_dir, fname)
-        fault_type, intensity, is_ff = sys_map["parser"](fname)
+            fpath = os.path.join(csv_dir, fname)
+            fault_type, intensity, is_ff = sys_map["parser"](fname)
 
-        label = "Normal" if is_ff else f"{fault_type}_{intensity}"
+            label = "Normal" if is_ff else f"{fault_type}_{intensity}"
 
-        files.append(FaultFileInfo(
-            filepath=fpath,
-            filename=fname,
-            system_id=system_id,
-            fault_type=fault_type,
-            fault_intensity=intensity,
-            is_fault_free=is_ff,
-            label=label,
-        ))
+            files.append(FaultFileInfo(
+                filepath=fpath,
+                filename=fname,
+                system_id=system_id,
+                fault_type=fault_type,
+                fault_intensity=intensity,
+                is_fault_free=is_ff,
+                label=label,
+            ))
+    if not files:
+        files = _discover_fault_files_from_parquet_cache(
+            system_id,
+            sys_map["csv_pattern"],
+            sys_map["parser"],
+        )
+        if not files:
+            logger.warning(f"CSV files and Parquet cache not found for {system_id}: {csv_dir}")
+            return []
 
     logger.info(
-        f"Discovered {len(files)} CSV files for '{system_id}' "
+        f"Discovered {len(files)} data files for '{system_id}' "
         f"({sum(1 for f in files if f.is_fault_free)} fault-free, "
         f"{sum(1 for f in files if not f.is_fault_free)} faulted)"
     )
@@ -244,6 +440,8 @@ def load_system_data(
     max_rows_per_file: Optional[int] = None,
     sample_frac: Optional[float] = None,
     random_state: int = 42,
+    parquet_cache_dir: Optional[str] = None,
+    use_parquet_cache: bool = True,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """
     Load all CSV files for a system into a single labeled DataFrame.
@@ -254,6 +452,8 @@ def load_system_data(
         max_rows_per_file: If set, limit rows loaded per file.
         sample_frac: If set, randomly sample this fraction from each file.
         random_state: Random seed for sampling.
+        parquet_cache_dir: Optional Parquet cache root.
+        use_parquet_cache: Prefer cached Parquet files when available.
 
     Returns:
         Tuple of (DataFrame with all data + 'fault_label' column,
@@ -268,12 +468,24 @@ def load_system_data(
     label_counter = 1
 
     for finfo in files:
-        logger.info(f"  Loading {finfo.filename} ({finfo.label})...")
+        source, source_path = get_fault_file_read_source(
+            finfo,
+            cache_dir=parquet_cache_dir,
+            use_parquet_cache=use_parquet_cache,
+        )
+        logger.info(
+            "  Loading %s (%s) via %s: %s",
+            finfo.filename,
+            finfo.label,
+            source,
+            source_path,
+        )
         try:
-            df = pd.read_csv(
-                finfo.filepath,
+            df = read_fault_file(
+                finfo,
                 nrows=max_rows_per_file,
-                low_memory=False,
+                cache_dir=parquet_cache_dir,
+                use_parquet_cache=use_parquet_cache,
             )
         except Exception as e:
             logger.error(f"  Failed to load {finfo.filename}: {e}")
@@ -282,20 +494,28 @@ def load_system_data(
         if sample_frac and sample_frac < 1.0:
             df = df.sample(frac=sample_frac, random_state=random_state)
 
-        # Assign fault label
+        # Assign fault metadata in one concat.  Some LBNL CSVs have many
+        # columns; repeated scalar inserts fragment the frame badly and slow
+        # server-side model training.
         if finfo.label not in label_map:
             label_map[finfo.label] = label_counter
             label_counter += 1
-        df["fault_label"] = label_map[finfo.label]
-        df["fault_label_str"] = finfo.label
-        df["source_file"] = finfo.filename
+        metadata = pd.DataFrame(
+            {
+                "fault_label": label_map[finfo.label],
+                "fault_label_str": finfo.label,
+                "source_file": finfo.filename,
+            },
+            index=df.index,
+        )
+        df = pd.concat([df.copy(), metadata], axis=1)
 
         dfs.append(df)
 
     if not dfs:
         return pd.DataFrame(), {}
 
-    combined = pd.concat(dfs, ignore_index=True)
+    combined = pd.concat(dfs, ignore_index=True).copy()
 
     # Basic cleaning: handle NaN
     # Drop columns that are entirely NaN

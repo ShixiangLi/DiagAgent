@@ -1,0 +1,23 @@
+{
+  "Normal": "none",
+  "coi_bias_-2": "sdahu::Cooling_Coil",
+  "coi_bias_-4": "sdahu::Cooling_Coil",
+  "coi_bias_2": "sdahu::Cooling_Coil",
+  "coi_bias_4": "sdahu::Cooling_Coil",
+  "coi_leakage_010": "sdahu::Cooling_Coil",
+  "coi_leakage_025": "sdahu::Cooling_Coil",
+  "coi_leakage_040": "sdahu::Cooling_Coil",
+  "coi_leakage_050": "sdahu::Cooling_Coil",
+  "coi_stuck_010": "sdahu::Cooling_Coil",
+  "coi_stuck_025": "sdahu::Cooling_Coil",
+  "coi_stuck_050": "sdahu::Cooling_Coil",
+  "coi_stuck_075": "sdahu::Cooling_Coil",
+  "damper_stuck_010": "sdahu::Outdoor_Air_Damper",
+  "damper_stuck_025": "sdahu::Outdoor_Air_Damper",
+  "damper_stuck_075": "sdahu::Outdoor_Air_Damper",
+  "damper_stuck_100_short": "sdahu::Outdoor_Air_Damper",
+  "oa_bias_-2": "sdahu::Outdoor_Air_Damper",
+  "oa_bias_-4": "sdahu::Outdoor_Air_Damper",
+  "oa_bias_2": "sdahu::Outdoor_Air_Damper",
+  "oa_bias_4": "sdahu::Outdoor_Air_Damper"
+}

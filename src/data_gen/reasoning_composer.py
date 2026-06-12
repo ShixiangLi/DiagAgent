@@ -29,7 +29,7 @@ _INITIAL_OPENERS = [
     "There's been an alert from the building management system.",
     "A maintenance ticket has come in regarding HVAC performance.",
     "The monitoring system has flagged an issue.",
-    "An anomaly has been reported in the HVAC infrastructure.",
+    "Unusual HVAC behavior has been reported.",
     "Building operations flagged a potential equipment issue.",
     "A performance degradation alert was triggered.",
     "I need to investigate a reported HVAC malfunction.",
@@ -50,14 +50,13 @@ _INITIAL_PLANS = [
 # --- System selection ---
 
 _SYS_SELECT_STARTERS = [
-    "Based on the reported symptoms in {system_name}, I should investigate the {system_name} ({system_id}) system first.",
-    "The symptoms point to the {system_name} system. Let me examine its components.",
-    "I'll start by drilling into the {system_name} ({system_id}) system to check its components.",
-    "The {system_name} system is the most likely source given the symptom profile. Let me get its component list.",
-    "Given the nature of the alert, the {system_name} ({system_id}) is a strong candidate. Let me inspect it.",
-    "I'll focus on the {system_name} system first - it matches the symptom signature.",
-    "The symptom pattern is consistent with {system_name} issues. Retrieving its component tree.",
-    "Starting my investigation with {system_name} ({system_id}) as it's the primary suspect based on the symptom location.",
+    "The symptom domain makes {system_name} ({system_id}) a plausible candidate, so I will inspect its components.",
+    "I'll start by drilling into {system_name} ({system_id}) as a candidate system and check the evidence.",
+    "The {system_name} system is relevant to this type of alert. Let me get its component list.",
+    "Given the nature of the alert, {system_name} ({system_id}) is a reasonable place to start. Let me inspect it.",
+    "I'll focus on {system_name} first as a candidate, then verify with component-level tools.",
+    "The symptom pattern is compatible with {system_name}, but I need tool evidence. Retrieving its component tree.",
+    "Starting with {system_name} ({system_id}) as a topology-relevant candidate before drawing conclusions.",
 ]
 
 # --- Diagnose request ---
@@ -66,39 +65,55 @@ _DIAGNOSE_PRE = [
     "Let me run diagnostics on {node_name} to check its operational status.",
     "I'll diagnose {node_name} to see if this component is the source of the issue.",
     "Checking {node_name} for any abnormalities that could explain the reported symptoms.",
-    "Time to run a health check on {node_name}.",
+    "Time to check {node_name}'s operating status.",
     "I need to evaluate {node_name}'s current operating condition.",
-    "Let me query the Oracle model for {node_name} to get its fault prediction.",
-    "Running fault detection on {node_name} using the sensor data.",
+    "Let me query the diagnostic tool for {node_name} to get its fault prediction.",
+    "Running a component diagnostic check on {node_name}.",
     "I'll check whether {node_name} is operating within expected parameters.",
-    "Performing diagnostic analysis on {node_name} to assess its health.",
+    "Performing diagnostic analysis on {node_name} to assess its operating state.",
     "Next, I should examine {node_name} - it's a potential contributor to the observed symptoms.",
-    "Let me evaluate {node_name}'s sensor readings against the trained model baseline.",
+    "Let me evaluate {node_name}'s current operating evidence.",
     "I'll investigate {node_name} to determine if it's functioning correctly.",
 ]
 
 # --- Normal response (after observation shows Normal) ---
 
 _NORMAL_OBSERVATIONS = [
-    "The diagnostic model reports {node_name} is operating normally with {confidence:.1%} confidence.",
-    "Results show {node_name} is healthy - {confidence:.1%} confidence in normal operation.",
-    "The Oracle confirms {node_name} has no anomalies (confidence: {confidence:.1%}).",
+    "The diagnostic result reports {node_name} is operating normally with {confidence:.1%} confidence.",
+    "Results show {node_name} is operating normally - {confidence:.1%} confidence.",
+    "The diagnostic result shows {node_name} has no anomalies (confidence: {confidence:.1%}).",
     "{node_name} passed the diagnostic check with {confidence:.1%} normal-status confidence.",
-    "Sensor analysis indicates {node_name} is within normal operating ranges ({confidence:.1%}).",
-    "The fault model predicts {node_name} is functioning correctly at {confidence:.1%} confidence.",
-    "No deviation detected at {node_name}. Model confidence: {confidence:.1%}.",
-    "{node_name}'s sensor readings all fall within the expected baseline ({confidence:.1%} confidence).",
+    "The diagnostic result indicates {node_name} is within normal operating ranges ({confidence:.1%}).",
+    "The tool result indicates {node_name} is functioning correctly at {confidence:.1%} confidence.",
+    "No deviation detected at {node_name}; confidence is {confidence:.1%}.",
+    "{node_name}'s observed behavior falls within the expected baseline ({confidence:.1%} confidence).",
 ]
 
 _NORMAL_CONCLUSIONS = [
-    "This component is not the source of the issue. I should investigate other components.",
-    "The fault must be elsewhere. Let me continue checking other candidates.",
-    "I can rule out {node_name} and move on to the next suspect.",
-    "This node is clean. I need to check other components or trace to a different system.",
-    "Ruling this one out. The root cause is somewhere else in the system.",
-    "{node_name} can be eliminated from the suspect list.",
-    "Since {node_name} is healthy, the problem lies elsewhere. Continuing investigation.",
-    "Not the culprit. I'll shift my attention to other components.",
+    "This component is not supported as the root cause, so I should continue with the next visible candidate in the current diagnostic plan.",
+    "This clears {node_name} for the current branch; I should use the visible topology to choose the next planned check.",
+    "I can rule out {node_name} and continue with another already visible candidate, not jump to an unrelated system.",
+    "This node is clean. I should stay with the current evidence path unless topology explicitly points elsewhere.",
+    "Ruling this one out narrows the search; the next action should follow the current component list or traced anchor.",
+    "{node_name} can be eliminated from the suspect list for this branch.",
+    "Since {node_name} appears normal, I should continue only along the planned topology path.",
+    "Not the culprit. I will use the current visible candidates to choose the next check.",
+]
+
+# --- Uncertain / unavailable response (after observation is not Normal) ---
+
+_UNCERTAIN_OBSERVATIONS = [
+    "The diagnostic result for {node_name} is inconclusive ({status}; confidence: {confidence:.1%}).",
+    "The diagnostic result cannot reliably clear {node_name}: {status} at {confidence:.1%} confidence.",
+    "{node_name} did not return a usable Normal confirmation ({status}, {confidence:.1%}).",
+    "The available evidence for {node_name} is unavailable or too weak to interpret as normal ({status}).",
+]
+
+_UNCERTAIN_CONCLUSIONS = [
+    "I should not treat this as normal evidence; I will continue with topology and other observations.",
+    "This does not rule the node out, so I need additional evidence before eliminating it.",
+    "Because this is inconclusive, I will pivot based on the reported symptoms and topology rather than call it normal.",
+    "This is a data-availability limitation, not proof of normal operation.",
 ]
 
 # --- Abnormal response (after observation shows Abnormal) ---
@@ -108,10 +123,10 @@ _ABNORMAL_OBSERVATIONS = [
     "The diagnostics indicate {node_name} has anomalous readings: {hint}.",
     "{node_name} is exhibiting abnormality - {hint}.",
     "Alert: {node_name} returned an Abnormal status. Indicators show {hint}.",
-    "The model detected anomalous conditions at {node_name}: {hint}.",
+    "The diagnostic result detected abnormal conditions at {node_name}: {hint}.",
     "Something's off with {node_name}. The analysis shows: {hint}.",
     "{node_name} deviates from normal: {hint}.",
-    "Anomaly detected at {node_name} - the Oracle flags: {hint}.",
+    "Anomaly detected at {node_name}: {hint}.",
 ]
 
 _ABNORMAL_REASONING = [
@@ -168,23 +183,23 @@ def compose_fault_found(
         _FAULT_OPENERS = [
             f"Root cause identified! {node_name} has a definitive fault: {fault_type} (confidence: {confidence:.1%}).",
             f"The diagnostics confirm {node_name} is the source of the problem: {fault_type} detected with {confidence:.1%} confidence.",
-            f"Found it - {node_name} has {fault_type}. This explains the downstream symptoms observed earlier.",
+            f"Found it - {node_name} has {fault_type}. This is definitive same-node fault evidence.",
             f"Confirmed: {node_name} is experiencing {fault_type} with {confidence:.1%} certainty.",
-            f"The fault model has positively identified {fault_type} at {node_name} ({confidence:.1%} confidence).",
+            f"The diagnostic result has positively identified {fault_type} at {node_name} ({confidence:.1%} confidence).",
         ]
     elif confidence >= 0.5:
         _FAULT_OPENERS = [
             f"Likely root cause: {node_name} shows {fault_type} (confidence: {confidence:.1%}). This is the strongest candidate.",
-            f"The Oracle flags {node_name} as the probable source: {fault_type} at {confidence:.1%} confidence.",
+            f"The diagnostic result flags {node_name} as the probable source: {fault_type} at {confidence:.1%} confidence.",
             f"{node_name} is the most likely fault source - {fault_type} detected with moderate confidence ({confidence:.1%}).",
             f"Diagnosis points to {node_name}: {fault_type} ({confidence:.1%}). While not conclusive, this is the top prediction.",
         ]
     else:
         _FAULT_OPENERS = [
             f"Possible root cause at {node_name}: {fault_type} (confidence: {confidence:.1%}). This is the top candidate despite low certainty.",
-            f"The Oracle's best prediction is {fault_type} at {node_name} ({confidence:.1%} confidence). Further evidence needed to confirm.",
+            f"The strongest diagnostic prediction is {fault_type} at {node_name} ({confidence:.1%} confidence). Further evidence is needed to confirm.",
             f"{node_name} shows signs of {fault_type} ({confidence:.1%}). This is a low-confidence detection but the strongest signal available.",
-            f"Primary candidate: {fault_type} at {node_name} with {confidence:.1%} confidence. The model is uncertain but this is the most plausible fault.",
+            f"Primary candidate: {fault_type} at {node_name} with {confidence:.1%} confidence. The evidence is uncertain but this is the most plausible fault.",
         ]
 
     opener = rng.choice(_FAULT_OPENERS)
@@ -215,25 +230,25 @@ def compose_final_diagnosis(
 
     _FINALS = [
         f"Based on my investigation, I've traced the issue from the observed symptoms to the root cause. "
-        f"The fault at {root_node} ({fault_type}) is causing propagation effects on downstream systems: {affected}.",
+        f"The supported diagnosis is {fault_type} at {root_node}; affected scope from the visible evidence: {affected}.",
 
-        f"Diagnosis complete. The root cause is {fault_type} at {root_node}, affecting {affected}. "
-        f"The diagnostic path confirms the causal chain from upstream fault to downstream symptoms.",
+        f"Diagnosis complete. The root cause is {fault_type} at {root_node}. "
+        f"The reported affected systems are limited to the topology and tool evidence observed: {affected}.",
 
         f"Investigation concluded. {root_node} is the primary fault source ({fault_type}), "
-        f"with cascading effects observed in: {affected}.",
+        f"with affected scope traced from visible topology evidence: {affected}.",
 
         f"After systematic analysis, the root cause has been isolated to {root_node} "
-        f"({fault_type}). Downstream impact detected in: {affected}.",
+        f"({fault_type}). Evidence-supported affected scope: {affected}.",
 
         f"The diagnostic investigation is complete. Root cause: {fault_type} at {root_node}. "
-        f"The fault has propagated to affect: {affected}.",
+        f"Visible tool evidence supports the following affected systems: {affected}.",
 
-        f"Summary: {root_node} exhibits {fault_type}, which is the origin of the symptoms "
-        f"observed across {affected}. The causal chain has been verified.",
+        f"Summary: {root_node} exhibits {fault_type}. "
+        f"The affected-system scope is traced through visible topology evidence: {affected}.",
 
-        f"Concluding diagnosis: {root_node} has {fault_type}, confirmed through systematic "
-        f"elimination and direct sensor analysis. Affected systems: {affected}.",
+        f"Concluding diagnosis: {root_node} has {fault_type}, supported by systematic "
+        f"topology exploration and component diagnostics. Affected systems: {affected}.",
     ]
 
     result = rng.choice(_FINALS)
@@ -263,16 +278,16 @@ def compose_no_fault_conclusion(
         f"The system appears to be operating within expected parameters.",
 
         f"No faults were detected during this investigation. "
-        f"I examined {nodes_str} - all passed health checks with high confidence.",
+        f"I examined {nodes_str} - all returned normal diagnostics with high confidence.",
 
         f"The diagnostic sweep across {nodes_str} found no anomalies. "
         f"All sensor readings fall within normal operating ranges.",
 
-        f"Investigation complete. All tested components ({nodes_str}) are healthy. "
+        f"Investigation complete. All tested components ({nodes_str}) appear normal. "
         f"No fault condition detected in the examined subsystems.",
 
         f"After systematically checking {nodes_str}, I found no evidence of faults. "
-        f"Each component's sensor data aligned with expected baseline values.",
+        f"Each component's observed data aligned with expected baseline values.",
 
         f"All diagnostic checks came back clean for {nodes_str}. "
         f"The reported symptoms may have been transient or caused by external factors.",
@@ -312,7 +327,7 @@ def compose_wrong_system_ack(
             f"{node_name} in the {system_name} system is operating normally ({confidence:.1%}). "
             f"This system is not the source of the reported issue. Let me investigate the system indicated by the symptoms.",
 
-            f"The {system_name} system checks out - {node_name} is healthy ({confidence:.1%}). "
+            f"The {system_name} system checks out - {node_name} is normal ({confidence:.1%}). "
             f"I can eliminate this system and focus elsewhere.",
 
             f"No issues found in {system_name}: {node_name} returned normal status ({confidence:.1%}). "
@@ -352,16 +367,16 @@ def compose_cross_system_transition(
         f"Let me trace upstream to the {to_system} system.",
 
         f"Evidence points to a cross-system fault propagation. "
-        f"The {from_system} symptoms may originate from {to_system}. Investigating.",
+        f"The {from_system} symptoms may originate from {to_system}. I will verify that candidate.",
 
         f"Cross-system analysis needed: the {from_system} anomalies appear to be caused by "
-        f"an upstream issue in {to_system}. Switching investigation target.",
+        f"an upstream issue in {to_system}. Switching investigation target for verification.",
 
-        f"The fault propagation pattern suggests {to_system} as the upstream source. "
-        f"Transitioning my investigation to that system.",
+        f"The fault propagation pattern makes {to_system} the upstream candidate. "
+        f"I will inspect that system before deciding.",
 
         f"Based on the topology links, {to_system} feeds into {from_system}. "
-        f"The root cause is likely in {to_system}. Let me check its components.",
+        f"{to_system} is the next component-source candidate to test.",
 
         f"Following the causal chain upstream from {from_system} to {to_system}.",
 
@@ -377,8 +392,26 @@ def compose_upstream_ack(
     from_name: str,
     to_name: str,
     rng: random.Random,
+    connected_via: Optional[str] = None,
+    target_component: Optional[str] = None,
 ) -> str:
     """Compose acknowledgment after upstream trace reveals connection."""
+    if connected_via or target_component:
+        anchor = []
+        if target_component:
+            anchor.append(f"target_component={target_component}")
+        if connected_via:
+            anchor.append(f"connected_via={connected_via}")
+        anchor_text = ", ".join(anchor)
+        options = [
+            f"The upstream trace and related-system map point from {from_name} to {to_name}; "
+            f"the exact visible anchor is {anchor_text}. I should use those node_ids directly.",
+            f"The cross-system dependency is grounded by {anchor_text}. "
+            f"I will keep the diagnosis on those returned anchors rather than inventing a component name.",
+            f"Topology now gives a concrete {to_name} candidate for {from_name}: {anchor_text}. "
+            f"The next diagnostic action should use the exact returned node_id.",
+        ]
+        return rng.choice(options)
 
     _ACKS = [
         f"The upstream trace reveals a connection to the {to_name} system. "
@@ -392,10 +425,16 @@ def compose_upstream_ack(
         f"Switching focus to {to_name}.",
 
         f"The topology confirms {to_name} -> {from_name} dependency. "
-        f"The root cause likely originates in {to_name}. Continuing there.",
+        f"{to_name} is now the upstream candidate to verify.",
 
         f"Cross-system dependency identified: {to_name} supplies {from_name}. "
         f"An upstream fault in {to_name} would explain the observed anomalies.",
+
+        f"The upstream path reaches {to_name}, so I will test that system before "
+        f"calling it the root cause.",
+
+        f"This trace exposes {to_name} as the feeding system for {from_name}; "
+        f"the next step is same-system component evidence.",
     ]
     return rng.choice(_ACKS)
 
@@ -569,6 +608,39 @@ def compose_normal_response(
     return f"{obs} {conclusion}"
 
 
+def compose_uncertain_response(
+    node_name: str,
+    status: str,
+    confidence: float,
+    message: str,
+    sensor_readings: Dict[str, float],
+    rng: random.Random,
+) -> str:
+    """Compose an uncertainty response without implying normal operation."""
+    clean_status = status or "unknown"
+    obs = rng.choice(_UNCERTAIN_OBSERVATIONS).format(
+        node_name=node_name,
+        status=clean_status,
+        confidence=confidence,
+    )
+    conclusion = rng.choice(_UNCERTAIN_CONCLUSIONS)
+
+    details = ""
+    if message:
+        compact = " ".join(str(message).split())
+        if len(compact) > 140:
+            compact = compact[:137] + "..."
+        compact = compact.rstrip(". ")
+        details = f" Tool note: {compact}."
+
+    if sensor_readings and rng.random() < 0.35:
+        evidence = _format_sensor_evidence(sensor_readings, rng, max_sensors=2)
+        if evidence:
+            return f"{obs}{details} Available readings: {evidence}. {conclusion}"
+
+    return f"{obs}{details} {conclusion}"
+
+
 def compose_abnormal_response(
     node_name: str,
     hint: str,
@@ -609,7 +681,7 @@ def compose_wrong_system(system_name: str, rng: random.Random) -> str:
 
 
 # ============================================================================
-# New reasoning blocks - anomaly-score & exploration
+# New reasoning blocks - topology-guided exploration
 # ============================================================================
 
 def compose_anomaly_score_selection(
@@ -618,47 +690,50 @@ def compose_anomaly_score_selection(
     anomaly_score: float,
     rng: random.Random,
 ) -> str:
-    """Compose system selection reasoning based on anomaly score."""
-    pct = f"{anomaly_score:.0%}"
+    """Compose system selection reasoning without hidden health-score claims.
+
+    The function name is kept for compatibility with older generator code, but
+    main-experiment trajectories must not mention anomaly_score or health_status
+    because those fields are not exposed to the agent.
+    """
     if anomaly_score <= 0.05:
         _NORMAL_SELECTIONS = [
-            f"The system overview shows {system_name} ({system_id}) is not elevated "
-            f"({pct} anomaly score). Since the user asked about this system, I will "
-            f"verify its components directly.",
+            f"{system_name} ({system_id}) is a plausible candidate from the "
+            f"symptom context. I will verify its component structure directly "
+            f"before drawing any conclusion.",
 
-            f"{system_name} ({system_id}) has a normal overview score ({pct}). "
-            f"I should still inspect it because the request names this system.",
+            f"I will inspect {system_name} ({system_id}) as a candidate system, "
+            f"then test nodes only after exposing its topology.",
 
-            f"The overview does not flag {system_name}; its anomaly score is {pct}. "
-            f"I will perform a targeted health check rather than treating it as a "
-            f"primary fault suspect.",
+            f"The overview gives me the building layout but not enough evidence "
+            f"to clear {system_name}. I will perform a targeted component check.",
 
-            f"All evidence so far keeps {system_name} at a normal anomaly level "
-            f"({pct}). I will continue with a limited verification of its components.",
+            f"I need tool evidence before deciding whether {system_name} is "
+            f"normal. I will start by listing its components.",
         ]
         return rng.choice(_NORMAL_SELECTIONS)
 
     _SELECTIONS = [
-        f"The system overview shows {system_name} ({system_id}) has the highest "
-        f"anomaly score ({pct}). This makes it the primary investigation target.",
+        f"The symptom pattern and system role make {system_name} ({system_id}) "
+        f"a reasonable first investigation target.",
 
-        f"Based on the anomaly scores, {system_name} stands out with {pct} - "
-        f"significantly higher than other systems. I should start investigating here.",
+        f"{system_name} is a plausible source for the reported behavior, so I "
+        f"should start by exposing its component hierarchy.",
 
-        f"{system_name} ({system_id}) has an anomaly score of {pct}, "
-        f"indicating potential issues. Let me examine its components.",
+        f"The reported symptoms are consistent with issues in {system_name} "
+        f"({system_id}). Let me examine its components.",
 
-        f"The health indicators show {system_name} at {pct} anomaly level. "
-        f"This is the most likely fault source. Let me drill into its components.",
+        f"{system_name} is topologically relevant to this request. I will drill "
+        f"into its components and test evidence one node at a time.",
 
-        f"Analyzing the system overview: {system_name} ({pct} anomaly) is the "
-        f"top priority. Other systems show lower scores. Focusing investigation here.",
+        f"The overview identifies {system_name} as one of the available HVAC "
+        f"systems. Based on the symptom context, I will focus there first.",
 
-        f"The Oracle's system-level analysis flags {system_name} with a {pct} "
-        f"anomaly score. I'll begin my investigation with this system.",
+        f"I will begin with {system_name} because its function matches the "
+        f"reported symptom domain.",
 
-        f"System health check reveals {system_name} as the primary suspect "
-        f"(anomaly: {pct}). Let me get its component list.",
+        f"Before diagnosing individual nodes, I need the component list for "
+        f"{system_name}.",
     ]
     return rng.choice(_SELECTIONS)
 
@@ -667,26 +742,26 @@ def compose_multi_system_ranking(
     systems_ranked: list,  # [(name, id, score), ...]
     rng: random.Random,
 ) -> str:
-    """Compose reasoning about multiple systems with anomaly scores."""
+    """Compose reasoning about multiple topology-relevant systems."""
     if not systems_ranked:
         return "Let me examine the building systems."
 
     top = systems_ranked[0]
-    descriptions = [f"{n} ({s:.0%})" for n, _, s in systems_ranked[:3]]
+    descriptions = [n for n, _, _ in systems_ranked[:3]]
     ranked_str = ", ".join(descriptions)
 
     _RANKINGS = [
-        f"System overview anomaly rankings: {ranked_str}. "
-        f"I'll start with {top[0]} as it has the highest anomaly score.",
+        f"Candidate systems from the topology and symptom context: {ranked_str}. "
+        f"I'll start with {top[0]}.",
 
-        f"Multiple systems show elevated anomaly scores: {ranked_str}. "
+        f"Several systems could plausibly explain the symptom: {ranked_str}. "
         f"Prioritizing {top[0]} for investigation.",
 
-        f"The health scan reveals several systems of interest: {ranked_str}. "
-        f"Beginning with {top[0]} - the most anomalous.",
+        f"The building topology leaves several candidates: {ranked_str}. "
+        f"Beginning with {top[0]} because it is the best initial match.",
 
-        f"Anomaly analysis shows: {ranked_str}. "
-        f"I'll investigate {top[0]} first, then check others if needed.",
+        f"Topology-based triage suggests checking {top[0]} first, then "
+        f"expanding to {ranked_str} if the evidence remains inconclusive.",
     ]
     return rng.choice(_RANKINGS)
 
@@ -703,19 +778,37 @@ def compose_system_elimination(
         f"I need to investigate the next candidate system.",
 
         f"{eliminated_system} is clear - {n_nodes_checked} components checked, "
-        f"all healthy. The fault must be elsewhere. Let me move to the next system.",
+        f"all normal. The fault must be elsewhere. Let me move to the next system.",
 
         f"No faults found in {eliminated_system} after checking {n_nodes_checked} nodes. "
         f"Eliminating this system and redirecting investigation.",
 
         f"Investigation of {eliminated_system} complete: {n_nodes_checked} components, "
-        f"zero faults. The anomaly score may have been a false positive. "
-        f"Proceeding to the next highest-scoring system.",
+        f"zero faults. Proceeding to the next topology-relevant system.",
 
         f"{eliminated_system} shows normal operation across all {n_nodes_checked} "
         f"checked components. Pivoting to the next system in my priority list.",
     ]
     return rng.choice(_ELIMINATIONS)
+
+
+def compose_system_inconclusive(
+    system_name: str,
+    n_nodes_checked: int,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning after a system check produced inconclusive evidence."""
+    _INCONCLUSIVE = [
+        f"I checked {n_nodes_checked} component(s) in {system_name}, but the evidence was not sufficient to clear the system. "
+        f"I will avoid treating unavailable or unknown tool results as Normal and continue with the topology-guided search.",
+
+        f"The {system_name} probe is inconclusive rather than clean. "
+        f"I need to keep moving through the diagnostic path instead of declaring this system normal.",
+
+        f"{system_name} did not provide enough usable evidence for elimination. "
+        f"I will pivot using the symptom location, topology, and subsequent targeted diagnostic calls.",
+    ]
+    return rng.choice(_INCONCLUSIVE)
 
 
 def compose_system_pivot(
@@ -725,22 +818,21 @@ def compose_system_pivot(
     rng: random.Random,
 ) -> str:
     """Compose reasoning for pivoting from an eliminated system to the next."""
-    pct = f"{to_score:.0%}"
     _PIVOTS = [
         f"Since {from_system} is clear, I'll now investigate {to_system} "
-        f"(anomaly score: {pct}). This is the next highest priority.",
+        f"as the next topology-relevant candidate.",
 
-        f"Moving investigation from {from_system} to {to_system} ({pct} anomaly). "
-        f"Let me get its component structure.",
+        f"Moving investigation from {from_system} to {to_system}. Let me get "
+        f"its component structure.",
 
-        f"With {from_system} eliminated, {to_system} becomes the primary suspect "
-        f"(anomaly: {pct}). Switching focus.",
+        f"With {from_system} eliminated, {to_system} is the next plausible "
+        f"system to verify based on the remaining symptom context.",
 
-        f"No issues in {from_system}. Next candidate: {to_system} at {pct} "
-        f"anomaly score. Let me examine its components.",
+        f"No issues in {from_system}. Next candidate: {to_system}. Let me "
+        f"examine its components.",
 
-        f"Redirecting from {from_system} (clear) to {to_system} (anomaly: {pct}). "
-        f"The anomaly score suggests potential issues in this system.",
+        f"Redirecting from {from_system} to {to_system}; the topology and "
+        f"reported symptoms make it the next system to verify.",
     ]
     return rng.choice(_PIVOTS)
 
@@ -750,7 +842,7 @@ def compose_status_summary_request(system_name: str, rng: random.Random) -> str:
     options = [
         f"Before probing components one by one, I should get a system-wide status summary for {system_name} to prioritize the most suspicious nodes.",
         f"A quick component status summary for {system_name} will help avoid an inefficient blind sweep.",
-        f"I'll ask the Oracle for a status summary across {system_name} so I can focus on candidate components first.",
+        f"I'll request a status summary across {system_name} so I can focus on candidate components first.",
         f"To narrow the search efficiently, I need a node status summary for {system_name}.",
     ]
     return rng.choice(options)
@@ -792,8 +884,30 @@ def compose_related_systems_ack(
     from_system: str,
     to_system: str,
     rng: random.Random,
+    connected_via: Optional[str] = None,
+    target_component: Optional[str] = None,
+    medium: Optional[str] = None,
 ) -> str:
     """Compose reasoning after related-system topology is returned."""
+    if connected_via or target_component:
+        anchor = []
+        if target_component:
+            anchor.append(f"target_component={target_component}")
+        if connected_via:
+            anchor.append(f"connected_via={connected_via}")
+        if medium:
+            anchor.append(f"medium={medium}")
+        anchor_text = ", ".join(anchor)
+        options = [
+            f"The related-system topology links {from_system} with {to_system} through exact anchors: {anchor_text}. "
+            f"I must use these returned node_ids directly for the cross-system trace.",
+            f"The connection map does not just name a system; it exposes node-level anchors ({anchor_text}). "
+            f"I should trace the target_component and diagnose the connected_via candidate if it is the plant fault source.",
+            f"Cross-system propagation is now grounded by {anchor_text}. "
+            f"I will not copy a downstream component name into {to_system}; the next actions must use the returned anchors.",
+        ]
+        return rng.choice(options)
+
     options = [
         f"The related-system topology links {from_system} with {to_system}. I should inspect {to_system} next as the likely propagation source.",
         f"The connection map supports a transition from {from_system} to {to_system}; this is the correct direction for root-cause tracing.",
@@ -831,28 +945,187 @@ def compose_related_systems_impact_ack(
     return rng.choice(options)
 
 
+def compose_children_query(
+    parent_name: str,
+    rng: random.Random,
+    purpose: str = "diagnosis",
+) -> str:
+    """Compose topology-expansion reasoning for get_node_children.
+
+    High-frequency topology expansion used to rely on a single sentence, which
+    caused SFT data to overfit one phrase instead of the underlying action
+    policy.  This function keeps the action semantics stable while varying the
+    observable reason for expanding a parent node.
+    """
+    name = str(parent_name or "this node").strip() or "this node"
+
+    if purpose == "no_fault":
+        openers = [
+            f"Before I can close a no-fault review, I need finer topology under {name}.",
+            f"A no-fault decision for this system needs visible leaf checks, so I will expand {name}.",
+            f"{name} is still an aggregate node; I should expose its components before clearing the case.",
+            f"I need more than a broad aggregate view of {name} before declaring normal operation.",
+            f"To avoid a shallow no-fault closure, I will list the components inside {name}.",
+            f"The no-fault review is not closed until representative visible components under {name} are checked.",
+        ]
+        reasons = [
+            "The next diagnostic calls should target concrete components rather than a parent grouping.",
+            "This keeps the normal-evidence chain tied to actual visible nodes.",
+            "Low-level candidates are needed for a defensible clean-system conclusion.",
+            "A parent-level listing is the safest way to choose valid node_id values.",
+        ]
+    elif purpose == "root_reveal":
+        openers = [
+            f"The upstream trace points into {name}, and I need its component hierarchy before diagnosing the root candidate.",
+            f"{name} is the relevant upstream system, but the candidate node must be exposed by topology first.",
+            f"Before testing the suspected root in {name}, I will reveal the returned hierarchy.",
+            f"The root candidate is inside {name}; I should list its components and use the exact returned node_id.",
+            f"I need the visible component path in {name} before making a same-node diagnostic call.",
+        ]
+        reasons = [
+            "That prevents inventing a plant component path.",
+            "The diagnosis should use node ids returned by tools.",
+            "Topology evidence has to precede the root-node check.",
+            "This keeps the cross-system trace grounded in visible structure.",
+        ]
+    else:
+        openers = [
+            f"I will expand {name} so the next diagnostic step uses a visible component.",
+            f"Before choosing a node to diagnose, I need the child structure under {name}.",
+            f"{name} is still a parent in the topology; listing its children will expose valid candidates.",
+            f"To continue the topology-guided search, I should reveal the components below {name}.",
+            f"I need to inspect the immediate children of {name} before selecting the next node.",
+            f"The current path reaches {name}; I will query its children to keep the investigation grounded.",
+            f"Expanding {name} will show which exact node_id values can be checked next.",
+            f"I should not guess a descendant of {name}; the child list needs to come from the tool.",
+        ]
+        reasons = [
+            "This keeps the search tied to the visible topology.",
+            "The next action should be based on returned nodes, not inferred names.",
+            "It also avoids skipping over intermediate equipment.",
+            "That gives a concrete frontier for the next diagnostic call.",
+            "The topology result will determine whether to diagnose or expand further.",
+        ]
+
+    connectors = [
+        " ",
+        " ",
+        " ",
+        " Next, ",
+    ]
+    second = rng.choice(reasons)
+    if second.startswith("This") or second.startswith("That") or second.startswith("It"):
+        return f"{rng.choice(openers)}{rng.choice(connectors)}{second}"
+    return f"{rng.choice(openers)} {second}"
+
+
+def compose_observable_system_start(
+    system_name: str,
+    rng: random.Random,
+    context: str = "general",
+) -> str:
+    """Compose reasoning for starting from a system named by visible symptoms."""
+    name = str(system_name or "the visible system").strip() or "the visible system"
+    if context == "cross":
+        options = [
+            f"The visible equipment cue points to {name}. I will inspect that downstream side first, then trace upstream only if tool evidence supports it.",
+            f"The report gives an observable starting point in {name}, so I will begin there and use topology before assigning a plant-level cause.",
+            f"{name} is the system exposed by the symptom wording. I will verify local evidence there before moving across systems.",
+            f"I will start with {name} because it is visible in the request, then follow returned topology if the evidence propagates upstream.",
+        ]
+    elif context == "low_confidence":
+        options = [
+            f"The report gives a visible cue for {name}. I will inspect that system first and require same-node evidence because the signal may be weak.",
+            f"{name} is the observable starting point. I will check it carefully and avoid closing on a weak result without sensor support.",
+            f"The symptom wording names equipment in {name}; I will start there and verify the candidate with same-node evidence.",
+            f"I will enter {name} from the visible cue, then treat any low-confidence result as unresolved until sensors support it.",
+        ]
+    else:
+        options = [
+            f"The user report gives a visible equipment cue for {name}. I will start there and verify whether it is the root cause or an affected node.",
+            f"{name} is the observable system in the request, so I will inspect it first and let tool evidence decide the next step.",
+            f"The symptom wording grounds the initial search in {name}. I will use topology and diagnostics to confirm or redirect.",
+            f"I should begin with {name} because it is visible from the report, not because of hidden root-cause knowledge.",
+        ]
+    return rng.choice(options)
+
+
+def compose_explicit_system_start(system_name: str, rng: random.Random) -> str:
+    """Compose reasoning when the prompt explicitly brackets a system name."""
+    name = str(system_name or "the named system").strip() or "the named system"
+    options = [
+        f"The request explicitly names {name}, so I will start inside that system and verify evidence directly.",
+        f"Because {name} is named in the prompt, the first topology expansion should be within that system.",
+        f"The user supplied {name} as the investigation context. I will inspect its components before drawing conclusions.",
+        f"I will honor the explicit {name} scope first instead of inferring an unseen downstream starting point.",
+    ]
+    return rng.choice(options)
+
+
+def compose_cross_downstream_start(
+    downstream_name: str,
+    rng: random.Random,
+    visible_cue: bool = False,
+) -> str:
+    """Compose the first downstream-side expansion in cross-system cases."""
+    name = str(downstream_name or "the downstream system").strip() or "the downstream system"
+    if visible_cue:
+        options = [
+            f"The visible symptom cue points to {name}. I will inspect that local system first, then trace upstream if the evidence is not closed there.",
+            f"{name} is the observable starting side of the cross-system case. I will check it before assigning responsibility upstream.",
+            f"The report grounds the investigation in {name}; topology will decide whether the source is local or upstream.",
+            f"I will begin at {name} because that is where the symptom is visible, then follow returned connections if needed.",
+        ]
+    else:
+        options = [
+            f"The symptom pattern suggests an affected downstream or terminal system. I will inspect {name} first and trace upstream only through tools.",
+            f"Before assigning a plant-level cause, I should verify the downstream side at {name}.",
+            f"{name} is a plausible affected system, so I will start there and use topology to test propagation.",
+            f"I will use {name} as the observable symptom-side entry point, then follow explicit cross-system links if local evidence remains secondary.",
+        ]
+    return rng.choice(options)
+
+
+def compose_upstream_anchor_trace(
+    local_name: str,
+    target_component: str,
+    rng: random.Random,
+) -> str:
+    """Compose reasoning for tracing upstream from a related-systems anchor."""
+    local = str(local_name or "the local symptom node").strip() or "the local symptom node"
+    target = str(target_component or "the returned target component").strip() or "the returned target component"
+    options = [
+        f"The local symptom node is {local}. The related-system result exposes target_component={target}, so I will trace upstream from that exact node.",
+        f"Cross-system topology gives a concrete anchor, target_component={target}. I will use it to trace upstream from {local}.",
+        f"Rather than inventing a plant-side node, I will follow the returned target_component={target} upstream from {local}.",
+        f"The connection map grounds the trace at target_component={target}; I will query upstream from that visible component.",
+        f"{local} is not enough to close the case. The returned anchor target_component={target} is the correct node for the upstream trace.",
+    ]
+    return rng.choice(options)
+
+
 def compose_warning_response(
     node_name: str,
     confidence: float,
     sensor_readings: Dict[str, float],
     rng: random.Random,
 ) -> str:
-    """Compose reasoning when Oracle returns Warning (low confidence)."""
+    """Compose reasoning when diagnose_node returns Warning (low confidence)."""
     pct = f"{confidence:.1%}"
     _WARNINGS = [
-        f"The Oracle reports a borderline result for {node_name} - "
+        f"The diagnostic result for {node_name} is borderline - "
         f"confidence is only {pct}, below the definitive threshold. "
         f"I should verify this with raw sensor data before concluding.",
 
         f"{node_name} returned a Warning status at {pct} confidence. "
         f"This is inconclusive. I need to cross-check with the actual "
-        f"sensor readings to confirm or rule out a fault.",
+        f"sensor readings to assess whether the evidence supports a fault.",
 
-        f"Interesting - {node_name} shows a Warning but the model is only "
+        f"Interesting - {node_name} shows a Warning but confidence is only "
         f"{pct} confident. The result is ambiguous. Let me examine the "
         f"sensor data directly to get more evidence.",
 
-        f"The diagnostic model is uncertain about {node_name} ({pct}). "
+        f"The diagnostic result is uncertain for {node_name} ({pct}). "
         f"A low-confidence Warning doesn't confirm a fault. "
         f"Sensor-level verification is needed.",
 
@@ -880,23 +1153,23 @@ def compose_sensor_verification(
     """Compose reasoning after examining sensors to verify a Warning."""
     _VERIFICATIONS = [
         f"Sensor analysis for {node_name}: {sensor_findings}. "
-        f"Combined with the Oracle's Warning, this provides sufficient "
-        f"evidence to confirm the diagnosis.",
+        f"Combined with the earlier Warning, this supports the candidate "
+        f"fault without treating the low-confidence result as definitive by itself.",
 
         f"After examining the sensor data, {sensor_findings}. "
-        f"Despite the Oracle's low confidence, the sensor evidence "
-        f"supports a fault determination at {node_name}.",
+        f"Despite the low-confidence diagnostic result, the sensor evidence "
+        f"supports keeping {node_name} as the fault candidate.",
 
         f"Cross-referencing sensor data with the Warning: {sensor_findings}. "
-        f"The sensor deviations corroborate the Oracle's suspicion. "
-        f"I can now make a more confident diagnosis.",
+        f"The same-node readings are consistent with the borderline warning. "
+        f"I can make a supported diagnosis without overstating the confidence.",
 
         f"Sensor verification complete: {sensor_findings}. "
-        f"The data confirms abnormal operation at {node_name}, "
-        f"validating the Oracle's borderline detection.",
+        f"The data supports the candidate abnormal operation at {node_name}, "
+        f"strengthening but not replacing the borderline detection.",
 
-        f"The raw sensor readings ({sensor_findings}) confirm the anomaly "
-        f"flagged by the Oracle at {node_name}. "
-        f"The fault is real despite the low model confidence.",
+        f"The raw sensor readings ({sensor_findings}) support the anomaly "
+        f"flagged at {node_name}. "
+        f"The fault is supported despite the low diagnostic confidence.",
     ]
     return rng.choice(_VERIFICATIONS)

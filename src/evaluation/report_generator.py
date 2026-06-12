@@ -38,13 +38,11 @@ def generate_markdown_report(
     # Overall Metrics Table
     lines.append("## Overall Metrics Comparison\n")
     metric_names = [
-        ("diagnostic_accuracy", "Diagnostic Accuracy (DA)"),
-        ("tool_format_validity", "Tool Format Validity (TFV)"),
-        ("diagnostic_completeness", "Diagnostic Completeness (DC)"),
-        ("search_efficiency", "Search Efficiency (SE)"),
-        ("reasoning_authenticity", "Reasoning Authenticity (RA)"),
-        ("tool_invocation_rationality", "Tool Invocation Rationality (TIR)"),
-        ("aggregate_score", "**Aggregate Score**"),
+        ("paper_DA", "Diagnostic Accuracy (DA)"),
+        ("paper_TR", "Topology Rationality (TR)"),
+        ("paper_ECR", "Evidence Closure Rate (ECR)"),
+        ("paper_SE", "Search Efficiency (SE)"),
+        ("paper_mean", "**Paper Mean Score**"),
     ]
 
     # Header
@@ -98,7 +96,7 @@ def generate_markdown_report(
             lines.append(header)
             lines.append(sep)
 
-            for key, display_name in metric_names[:6]:
+            for key, display_name in metric_names:
                 row = f"| {display_name} |"
                 for stype in types:
                     val = type_metrics[stype].get(key, 0)
@@ -120,7 +118,7 @@ def generate_markdown_report(
             lines.append(header)
             lines.append(sep)
 
-            for key, display_name in metric_names[:6]:
+            for key, display_name in metric_names:
                 row = f"| {display_name} |"
                 for diff in diffs:
                     val = diff_metrics[diff].get(key, 0)

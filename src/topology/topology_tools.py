@@ -95,9 +95,12 @@ TOPOLOGY_TOOL_SCHEMAS = [
         "name": "get_node_sensors",
         "description": (
             "Get the list of sensors associated with a given component node. "
-            "Returns sensor names and their types (e.g., temperature, pressure, "
-            "flow, status). Use this to understand what measurements are available "
-            "for diagnosing a specific component."
+            "Returns sensor names, types, and current readings when a runtime "
+            "scenario is active. Use this after a Warning diagnose_node result "
+            "to verify the component with sensor-level evidence before "
+            "concluding. Low-confidence Normal, unknown, or data_unavailable "
+            "results should be treated as unresolved topology evidence rather "
+            "than sensor-confirmed facts."
         ),
         "parameters": {
             "type": "object",
@@ -145,15 +148,20 @@ class TopologyToolExecutor:
     graph queries, returning structured results.
     """
 
-    def __init__(self, topology_builder, health_provider=None):
+    def __init__(self, topology_builder, health_provider=None, sensor_provider=None):
         """
         Args:
             topology_builder: An initialized TopologyBuilder with a built graph.
             health_provider: Optional PredictionToolExecutor that provides
                 system-level anomaly scores via get_system_health().
+            sensor_provider: Optional PredictionToolExecutor that provides
+                current scenario sensor readings. This is separate from
+                health_provider so readings can be exposed while hidden system
+                health scores remain disabled.
         """
         self.tb = topology_builder
         self._health_provider = health_provider
+        self._sensor_provider = sensor_provider
         self._tool_map = {
             "get_system_overview": self._get_system_overview,
             "get_node_children": self._get_node_children,
@@ -214,6 +222,15 @@ class TopologyToolExecutor:
         node_id = args.get("node_id", "")
         if not node_id:
             return {"status": "error", "error": "node_id is required"}
+        if self.tb.get_node_info(node_id) is None:
+            return {
+                "status": "error",
+                "error": (
+                    f"Node '{node_id}' not found in topology. Use an exact "
+                    "node_id returned by a previous tool result; do not append "
+                    "or synthesize hierarchy segments."
+                ),
+            }
 
         children = self.tb.get_children(node_id)
         result = []
@@ -230,6 +247,15 @@ class TopologyToolExecutor:
         node_id = args.get("node_id", "")
         if not node_id:
             return {"status": "error", "error": "node_id is required"}
+        if self.tb.get_node_info(node_id) is None:
+            return {
+                "status": "error",
+                "error": (
+                    f"Node '{node_id}' not found in topology. Use an exact "
+                    "node_id returned by a previous tool result; do not append "
+                    "or synthesize hierarchy segments."
+                ),
+            }
 
         downstream = self.tb.get_downstream_nodes(node_id)
         result = []
@@ -247,6 +273,15 @@ class TopologyToolExecutor:
         node_id = args.get("node_id", "")
         if not node_id:
             return {"status": "error", "error": "node_id is required"}
+        if self.tb.get_node_info(node_id) is None:
+            return {
+                "status": "error",
+                "error": (
+                    f"Node '{node_id}' not found in topology. Use an exact "
+                    "node_id returned by a previous tool result; do not append "
+                    "or synthesize hierarchy segments."
+                ),
+            }
 
         upstream = self.tb.get_upstream_nodes(node_id)
         result = []
@@ -264,16 +299,60 @@ class TopologyToolExecutor:
         node_id = args.get("node_id", "")
         if not node_id:
             return {"status": "error", "error": "node_id is required"}
+        if self.tb.get_node_info(node_id) is None:
+            return {
+                "status": "error",
+                "error": (
+                    f"Node '{node_id}' not found in topology. Use an exact "
+                    "node_id returned by a previous tool result; do not append "
+                    "or synthesize hierarchy segments."
+                ),
+            }
 
         sensors = self.tb.get_sensors(node_id)
+        current_readings = self._get_current_sensor_readings(node_id)
         result = []
         for s in sensors:
-            result.append({
+            sensor_name = s.get("name", "")
+            sensor_info = {
                 "sensor_id": s.get("node_id", ""),
-                "name": s.get("name", ""),
+                "name": sensor_name,
                 "type": s.get("brick_class", ""),
-            })
-        return {"status": "success", "component_node": node_id, "sensors": result}
+            }
+            if sensor_name in current_readings:
+                sensor_info["current_value"] = current_readings[sensor_name]
+            result.append(sensor_info)
+
+        response = {
+            "status": "success",
+            "component_node": node_id,
+            "sensors": result,
+            "readings_available": bool(current_readings),
+        }
+        if current_readings:
+            response["sensor_readings"] = current_readings
+        else:
+            response["message"] = (
+                "No current runtime readings are available for this component; "
+                "the topology sensor list is still returned."
+            )
+        return response
+
+    def _get_current_sensor_readings(self, node_id: str) -> Dict[str, Any]:
+        provider = getattr(self, "_sensor_provider", None)
+        scenario_state = getattr(provider, "scenario_state", None)
+        if scenario_state is None:
+            return {}
+        try:
+            readings = scenario_state.get_sensor_readings(node_id)
+        except Exception:
+            return {}
+        if provider is not None and hasattr(provider, "_sanitize_sensor_readings"):
+            try:
+                readings = provider._sanitize_sensor_readings(readings)
+            except Exception:
+                pass
+        return dict(readings or {})
 
     def _get_related_systems(self, args: Dict) -> Dict:
         system_id = args.get("system_id", "")
